@@ -235,7 +235,7 @@ def main() -> int:
         root_dest = os.path.join(staging, entry_point)
         with open(entries[0][1], "rb") as src, open(root_dest, "wb") as dst:
             dst.write(src.read())
-        print(f"  + {entry_point}  (根目录兼容)")
+        print(f"  + {entry_point}  (root dir compat)")
 
     version = args.version or read_crate_version(root)
 
