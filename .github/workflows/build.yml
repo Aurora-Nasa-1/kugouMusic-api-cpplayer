@@ -232,7 +232,7 @@ jobs:
           distribution: temurin
           java-version: '17'
       - run: cargo build --release --lib --features jni
-      - run: bash tools/jni-smoke/run.sh target/release/libkugou_music_rs.so
+      - run: bash tools/jni-smoke/run.sh $PWD/target/release/libkugou_music_rs.so
 
   release:
     name: Release
