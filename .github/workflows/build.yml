@@ -1,0 +1,194 @@
+name: Build Module
+
+# 三端二架构构建矩阵：
+#   android -> arm64-v8a / x86_64 / armeabi-v7a (一个 zip 装载全部 ABI)
+#   windows -> x86_64-pc-windows-msvc / aarch64-pc-windows-msvc
+#   linux   -> x86_64-unknown-linux-gnu / aarch64-unknown-linux-gnu
+# 产物均符合 CPPlayer-KMP Standard v3 JNI 规范。
+
+on:
+  push:
+    branches:
+      - '**'
+    tags:
+      - '*'
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  android:
+    name: Android (arm64-v8a / x86_64 / armeabi-v7a)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,x86_64-linux-android,armv7-linux-androideabi
+
+      - name: Install cargo-ndk
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk
+
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r27c
+          add-to-path: false
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: android
+
+      - name: Build Android ABIs
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          RUSTFLAGS: -Clink-arg=-Wl,-z,max-page-size=16384
+        run: |
+          cargo ndk -t arm64-v8a -t x86_64 -t armeabi-v7a \
+            -o ./target/jniLibs build --release --features jni,jni-android
+
+      - name: Package Android module
+        run: |
+          python scripts/package_module.py --platform android \
+            --lib arm64-v8a=target/jniLibs/arm64-v8a/libkugou_music_rs.so \
+            --lib x86_64=target/jniLibs/x86_64/libkugou_music_rs.so \
+            --lib armeabi-v7a=target/jniLibs/armeabi-v7a/libkugou_music_rs.so
+
+      - name: Upload Android artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kugou-music-rs-android
+          path: target/kugou-music-rs-*.zip
+          if-no-files-found: error
+
+  windows:
+    name: Windows (${{ matrix.target }})
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            arch: x86_64
+          - target: aarch64-pc-windows-msvc
+            arch: aarch64
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-${{ matrix.target }}
+
+      - name: Build Windows
+        run: cargo build --release --features jni --target ${{ matrix.target }}
+
+      - name: Package Windows module
+        run: |
+          python scripts/package_module.py --platform windows `
+            --lib ${{ matrix.arch }}=target/${{ matrix.target }}/release/kugou_music_rs.dll `
+            --out target/kugou-music-rs-windows-${{ matrix.arch }}.zip
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kugou-music-rs-windows-${{ matrix.arch }}
+          path: target/kugou-music-rs-windows-*.zip
+          if-no-files-found: error
+
+  linux:
+    name: Linux (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            arch: x86_64
+            use_cross: false
+          - target: aarch64-unknown-linux-gnu
+            arch: aarch64
+            use_cross: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-${{ matrix.target }}
+
+      - name: Build Linux (Native)
+        if: ${{ !matrix.use_cross }}
+        run: cargo build --release --features jni --target ${{ matrix.target }}
+
+      - name: Build Linux (Cross)
+        if: ${{ matrix.use_cross }}
+        uses: houseabsolute/actions-rust-cross@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --features jni
+
+      - name: Package Linux module
+        run: |
+          python scripts/package_module.py --platform linux \
+            --lib ${{ matrix.arch }}=target/${{ matrix.target }}/release/libkugou_music_rs.so \
+            --out target/kugou-music-rs-linux-${{ matrix.arch }}.zip
+
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kugou-music-rs-linux-${{ matrix.arch }}
+          path: target/kugou-music-rs-linux-*.zip
+          if-no-files-found: error
+
+  release:
+    name: Release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [android, windows, linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip
+          generate_release_notes: true

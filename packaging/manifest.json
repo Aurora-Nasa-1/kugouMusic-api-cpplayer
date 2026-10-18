@@ -1,0 +1,36 @@
+{
+  "id": "kugou-music-rs",
+  "name": "酷狗音乐",
+  "version": "0.1.0",
+  "type": "jni",
+  "entryPoint": "libkugou_music_rs.so",
+  "contract": "standard",
+  "capabilities": [
+    "search",
+    "playback",
+    "lyricsSearch",
+    "qrLogin",
+    "charts"
+  ],
+  "loginMethods": [
+    "qr",
+    "cookie"
+  ],
+  "targetAppPackage": "com.kugou.android",
+  "apiMap": {
+    "cloudsearch": "search",
+    "song/url/v1": "song/url",
+    "song/url/v1/302": "song/url",
+    "song/download/url/v1": "song/url",
+    "lyric/new": "lyric",
+    "song/detail": "song/detail",
+    "search/hot/detail": "search/hot",
+    "search/suggest": "search/suggest",
+    "toplist": "toplist",
+    "toplist/detail": "toplist",
+    "login/qr/key": "login/qr/key",
+    "login/qr/create": "login/qr/create",
+    "login/qr/check": "login/qr/check",
+    "login/status": "login/status"
+  }
+}
