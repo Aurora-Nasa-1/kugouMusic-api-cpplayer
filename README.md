@@ -1,171 +1,148 @@
-# kugou-music-rs (CPPlayer-KMP 酷狗音源模块)
+# kugou-music-rs
 
-本项目从开源项目 [md3Music](https://github.com/zzyoxml/md3Music) 的 `kugou_api_server/rust` 中完整提取并保留 Rust 服务端源码，在此基础上进行了深度改造与适配：
+CPPlayer-KMP 的酷狗音乐音源模块。Rust 写成的 `cdylib`，以 **Standard v3（`contract: "standard"`）** 契约直接跑在宿主进程里 —— 无独立服务、无端口转发，搜索/播放链接/歌词/榜单/扫码登录都在 Native 层完成。
 
-1. **CPPlayer-KMP JNI 接口对接**：提供与 CPPlayer-KMP 完全兼容的高性能 JNI 动态链接库出口。
-2. **纯粹 Standard v3 API 规范**：严格执行扁平化 `Standard v3` 数据契约（`contract: "standard"`），彻底摒弃旧版网易云多层嵌套兼容模式。
-3. **三端两架构跨平台支持**：覆盖 **Android / Windows / Linux (以及 macOS)** 三大平台，支持 `x86_64` 与 `aarch64` (ARM64) 两大主流 CPU 架构（以及 Android `armeabi-v7a`）。
-4. **双工作模式**：
-   - **进程内 Direct JNI 调用**：零端口占用、无网络转发损耗，直接在 Native 层完成解密并返回 Standard v3 JSON。
-   - **内置 HTTP Server 模式**：通过 `startNativeServer(port)` 启动内置 Actix-web 服务，支持标准 RESTful 调用。
+源码提取自 [md3Music](https://github.com/zzyoxml/md3Music) 的 `kugou_api_server/rust`，之后按 CPPlayer 的模块规范做了大幅改造：JNI 边界、扁平化数据契约、设备身份注册、跨平台打包都已重写。
 
 ---
 
-## 目录结构
+## 直接安装（推荐）
 
-```text
-kugouMusic-api-cpplayer/
-├── Cargo.toml                     # Rust 编译配置 (cdylib, rlib, jni features)
-├── build_module_desktop.ps1       # Windows MSVC 本地一键编译与打包脚本
-├── build_module.sh                # Linux / Android / macOS 交叉编译与打包脚本
-├── .github/
-│   └── workflows/
-│       └── build.yml              # GitHub Actions 三端二架构自动化打包与 Release
-├── packaging/
-│   └── manifest.json              # CPPlayer 模块清单 (contract: "standard", apiMap, capabilities)
-├── scripts/
-│   └── package_module.py          # 跨平台规范 Zip 打包工具
-├── src/
-│   ├── lib.rs                     # 库入口，导出 C FFI / JNI
-│   ├── jni.rs                     # CPPlayer JNI 接口实现 (nativeCallApi, startNativeServer)
-│   ├── standard_api.rs            # Standard v3 API 扁平化数据转换器
-│   ├── server.rs                  # Actix-web 内置 HTTP 服务
-│   ├── service/                   # 酷狗业务核心 (搜索, 播放链接, 歌词, 榜单, 二维码等)
-│   ├── crypto/                    # 酷狗专有加密算法 (Kugou MD5, RSA, DES)
-│   ├── model/                     # 酷狗原始数据模型
-│   └── utils/                     # 辅助工具函数
-└── tests/
-    └── standard_api_test.rs       # Standard v3 契约自动化单测
-```
+去 [Releases](https://github.com/Aurora-Nasa-1/kugouMusic-api-cpplayer/releases) 下载与宿主平台对应的 zip，在 CPPlayer「音源管理 → 导入模块」里选中即可，不需要自己编译。
+
+| 宿主平台 | 下载 |
+| :--- | :--- |
+| Android（arm64-v8a / x86_64 / armeabi-v7a，三合一包） | `kugou-music-rs-android.zip` |
+| Windows x64 | `kugou-music-rs-windows-x86_64.zip` |
+| Windows on ARM | `kugou-music-rs-windows-aarch64.zip` |
+| Linux x64 | `kugou-music-rs-linux-x86_64.zip` |
+| Linux arm64 | `kugou-music-rs-linux-aarch64.zip` |
+
+每个 zip 旁边有 `SHA256SUMS.txt` 可校验下载完整性。
+
+> 各平台库的扩展名不同（`.so` / `.dll`），而 manifest 里的 `entryPoint` 只能写一个文件名，**所以不存在"一个包通吃所有平台"**。Android 之所以能三个 ABI 合成一个包，是因为它们同名同后缀。装错平台的包，宿主会提示找不到入口库。
 
 ---
 
-## Standard v3 API 契约规范
+## 已实现的路由
 
-模块在 `manifest.json` 中声明 `"contract": "standard"`，通过 `nativeCallApi(path, queryJson)` 返回的所有数据均遵循标准格式：
+宿主通过 `nativeCallApi(method, paramsJson)` 调用，`method` 与 `manifest.json` 的 `apiMap` 对应：
 
-### 响应基础结构
-所有响应均为扁平 JSON：
-```json
-{
-  "code": 0,
-  "msg": "success",
-  "data": { ... }
-}
-```
-
-### 核心接口映射
-
-| Standard v3 路由 | 说明 | 关键返回字段 (`data`) |
+| 路由 | 说明 | 关键返回字段（`data`） |
 | :--- | :--- | :--- |
-| `/api/v3/search` | 歌曲搜索 | `{ "tracks": [ { "id", "title", "artist", "album", "duration", "coverUrl" } ], "total": 100 }` |
-| `/api/v3/song/url` | 获取播放链接 | `{ "url": "https://...", "format": "mp3", "quality": "320k", "headers": { ... } }` |
-| `/api/v3/lyric` | 歌词获取 | `{ "lyric": "[00:00.00]...", "transLyric": null, "romaLyric": null }` |
-| `/api/v3/toplist` | 热门榜单推荐 | `[ { "id": "rank_id", "name": "酷狗飙升榜", "coverUrl": "..." } ]` |
-| `/api/v3/toplist/detail`| 榜单歌曲详情 | `{ "tracks": [ { "id", "title", "artist", "album", "duration", "coverUrl" } ] }` |
-| `/api/v3/login/qr/key` | 生成二维码 Key | `{ "unikey": "...", "qrurl": "https://..." }` |
-| `/api/v3/login/qr/check` | 轮询二维码状态 | `{ "code": 801/802/803, "msg": "...", "cookie": "..." }` |
+| `cloudsearch` | 歌曲搜索 | `tracks[]` / `total` |
+| `song/url/v1` | 播放直链 | `url` / `format` / `quality` / `headers` |
+| `lyric/new` | 歌词（LRC） | `lyric` |
+| `song/detail` | 歌曲详情 | `tracks[]` |
+| `toplist` / `toplist/detail` | 榜单与榜单歌曲 | `list[]` / `tracks[]` |
+| `search/hot/detail` | 热搜词 | `searchWord` |
+| `search/suggest` | 搜索联想 | 建议词列表 |
+| `login/qr/key` → `login/qr/create` → `login/qr/check` | 扫码登录 | `unikey` / `qrurl` / `code` + `cookie` |
+| `login/status` | 登录态检查 | 酷狗 VIP 详情原样透传 |
 
-> **注意与旧版网易云结构的区别**：
-> - 歌曲列表直接命名为 `tracks`，不再嵌套 `songs[].al.picUrl` / `songs[].ar[].name`。
-> - 时长字段 `duration` 统一以**秒 (s)**为单位，不是毫秒 (ms)。
-> - 艺术家字段 `artist` 为直接可展示的扁平字符串。
+歌曲对象是扁平的：`{ id, title, artist, album, duration, coverUrl }`。`duration` 单位为**秒**，`artist` 是可直接展示的字符串 —— 不是旧版网易云的 `songs[].ar[].name` 那套嵌套结构。
+
+返回值永远是 JSON 字符串。上游失败也是 `{"code": 500, "msg": "..."}`，不会抛出异常或让宿主崩溃。
 
 ---
 
-## JNI 导出接口规范
+## JNI 接口
 
-Java 层类名统一对应 `cp.player.core.provider.JniProvider`：
+类名固定为 `cp.player.core.provider.JniProvider`（JNI 按 `Java_<包名下划线化>_<类名>_<方法名>` 查符号，改名即 `UnsatisfiedLinkError`）：
 
-```rust
-// 启动内置 HTTP 服务器（可选）
-#[no_mangle]
-pub extern "system" fn Java_cp_player_core_provider_JniProvider_startNativeServer(
-    env: JNIEnv,
-    _class: JClass,
-    port: jint,
-) -> jint
-
-// 直接内存调用 API（推荐，高性能无端口占用）
-#[no_mangle]
-pub extern "system" fn Java_cp_player_core_provider_JniProvider_nativeCallApi(
-    mut env: JNIEnv,
-    _class: JClass,
-    j_path: JString,
-    j_query_json: JString,
-) -> jstring
-
-// 音频文件本地元数据解析（支持 kgm / flac / mp3 等分析）
-#[no_mangle]
-pub extern "system" fn Java_cp_player_core_provider_JniProvider_analyzeAudioFile(
-    mut env: JNIEnv,
-    _class: JClass,
-    j_file_path: JString,
-) -> jstring
+```java
+native void   startNativeServer(String host, int port);          // 启动内置 HTTP 调试服务
+native String nativeCallApi(String method, String paramsJson);   // 进程内直调（推荐）
+native String analyzeAudioFile(String path);                     // 暂未实现，返回 error JSON
 ```
 
-同时也保留了 `com_plugin_kugou_NativeServer_*` 与 `com_kugou_music_NativeBridge_*` 兼容性符号别名。
+`startNativeServer` 是可选能力：只有想用浏览器/curl 调 REST 接口时才需要，端口传 `0` 让系统分配。
+
+`legacy-jni-symbols` feature 额外导出三个历史包名的别名符号（`cp.cpplayer.core.provider`、`cp.player.kmp.provider`、`cp.player.provider`），默认不开启。
 
 ---
 
-## 本地编译与打包
+## 从源码构建
 
-### 1. Windows 桌面版 (x86_64 / MSVC)
-运行仓库自带的 PowerShell 打包脚本：
+```bash
+cargo build --release --lib          # jni 已是默认 feature
+```
+
+产物：Windows `target/release/kugou_music_rs.dll`，Linux/Android `libkugou_music_rs.so`。
+
+打成可安装的模块包：
+
+```bash
+python scripts/package_module.py --platform windows \
+  --lib x86_64=target/release/kugou_music_rs.dll \
+  --out target/kugou-music-rs-windows-x86_64.zip
+```
+
+脚本以 `packaging/manifest.json` 为唯一数据源，生成的 manifest 会回读自检（合法性、无 BOM、必填字段），`--validate-only` 可单独校验清单。
+
+Windows 本地一键脚本（自动找 MSVC 环境、编译、打包）：
+
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\build_module_desktop.ps1
 ```
-产物将输出至：`target/kugou-music-rs-windows.zip`。
 
-### 2. Linux / Android 交叉编译
-确保系统已安装相应 target 以及 Android NDK，执行：
+Android 需要 NDK 与 `cargo-ndk`：
+
 ```bash
-chmod +x build_module.sh
-# 编译全部支持架构
-./build_module.sh --all
-# 或只编译 Android 架构
-./build_module.sh --android
+./build_module.sh android        # arm64-v8a / x86_64 / armeabi-v7a
 ```
 
 ---
 
-## GitHub Actions 持续集成 (CI/CD)
-
-项目已配置完整的 GitHub Actions 工作流 (`.github/workflows/build.yml`)：
-- **Android**: `aarch64-linux-android` (arm64-v8a), `x86_64-linux-android` (x86_64), `armv7-linux-androideabi` (armeabi-v7a)
-- **Windows**: `x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc`
-- **Linux**: `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`
-- **自动化 Release**: 推送 tag（如 `v1.0.0`）时，CI 会自动编译所有平台的库并打包成符合 CPPlayer 规范的 Zip 发布包。
-
----
-
-## CPPlayer-KMP 模块包规格
-
-打包输出的 Zip 文件内部结构如下：
+## 模块包结构
 
 ```text
-kugou-music-rs-windows.zip
-├── manifest.json              # 模块元数据与 API 路由表
-├── kugou_music_rs.dll         # 根目录库（兼容桌面端直接加载）
+kugou-music-rs-windows-x86_64.zip
+├── manifest.json                 # 模块元数据 + apiMap
+├── kugou_music_rs.dll            # 根目录一份（桌面端直接加载，兼容旧宿主）
 └── lib/
     └── x86_64/
-        └── kugou_music_rs.dll # 多架构目录
+        └── kugou_music_rs.dll    # 按 ABI 分目录
 ```
 
-在 Android 或全架构全平台包中：
-```text
-kugou-music-rs-all.zip
-├── manifest.json
-└── lib/
-    ├── arm64-v8a/
-    │   └── libkugou_music_rs.so
-    ├── armeabi-v7a/
-    │   └── libkugou_music_rs.so
-    ├── x86_64/
-    │   ├── libkugou_music_rs.so
-    │   └── kugou_music_rs.dll
-    └── aarch64/
-        ├── libkugou_music_rs.so
-        └── kugou_music_rs.dll
+Android 包同理，换成 `lib/<abi>/libkugou_music_rs.so`。
+
+---
+
+## 排障
+
+**装上了但调不通（`UnsatisfiedLinkError`）**
+库的导出符号必须与 `cp.player.core.provider.JniProvider` 严格对应。用 `tools/jni-smoke` 可以在不启动宿主的情况下复现：
+
+```bash
+bash tools/jni-smoke/run.sh target/release/libkugou_music_rs.so
+# Windows
+powershell -ExecutionPolicy Bypass -File tools\jni-smoke\run.ps1
 ```
-将该 Zip 包直接放入 CPPlayer-KMP 的 `modules/` 目录或通过客户端“本地安装扩展模块”即可直接生效。
+
+它会用与宿主完全一致的包名/类名/方法签名加载库，逐个跑真实接口并汇总 pass/fail。
+
+**搜索有结果但播放没声**
+播放直链接口需要真实设备身份（`dfid`）。模块会在首次调用 `song/url` 时自动 `register/dev` 并缓存到数据目录的 `device_info.json`，正常情况下无需干预。如果返回 `no playable url`，看返回里的 `reason`：常见是版权/付费曲，或调用方传了无效 `cookie` 触发了风控。
+
+**模块导入失败**
+多半是 `manifest.json` 不合法（BOM、尾逗号、缺字段）。跑 `python scripts/package_module.py --validate-only` 定位。
+
+---
+
+## CI
+
+`.github/workflows/build.yml`：
+
+- push 任意分支 / PR / 手动触发 → 构建全部平台，产物上传为 workflow artifact
+- push tag `v*` → 先跑清单校验与单测，再构建 Android 3 ABI、Windows x64+arm64、Linux x64+arm64，合并发 Release
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+---
+
+## 免责声明
+
+本项目仅用于学习与技术研究。所有音乐内容版权归酷狗音乐及相应版权方所有，请勿用于任何商业用途。接口来自第三方客户端，可能随时变更或失效。
