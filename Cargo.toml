@@ -10,7 +10,9 @@ name = "kugou_music_rs"
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = []
+# 默认就带 jni：这是宿主唯一使用的入口。曾经默认空，忘记加 --features jni 会
+# 编出一个"能装但没有任何导出符号"的库，宿主侧只报 UnsatisfiedLinkError。
+default = ["jni"]
 jni = ["dep:jni"]
 jni-android = ["jni", "dep:android_logger"]
 legacy-jni-symbols = []
@@ -44,4 +46,7 @@ tiny_http = { path = "vendor/tiny_http" }
 [profile.release]
 opt-level = 3
 lto = true
-panic = "abort"
+# 不能是 "abort"：这个 cdylib 被 System.load() 进宿主进程，panic 一旦 abort
+# 就是整个 App 闪退。JNI 导出函数用 catch_unwind 兜底，把 panic 降级成
+# 单次调用的 JSON 错误。
+panic = "unwind"

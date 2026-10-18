@@ -78,7 +78,13 @@ pub fn aes_cbc_encrypt(key: &[u8], iv: &[u8], plain: &[u8]) -> Vec<u8> {
                 *b = pad;
             }
             let cipher = <$ty>::new_from_slice(key).expect("aes key");
-            let mut prev: Vec<u8> = iv.to_vec();
+            // IV 长度不合法时不能直接喂给 zip：`blk.zip(prev)` 会截断成更短的
+            // Vec，随后 `GenericArray::clone_from_slice` 长度不匹配 → panic。
+            // 对上层调用方（音源接口）来说那等于整个宿主进程被 abort 掉。
+            let mut prev: Vec<u8> = vec![0u8; bs];
+            for (dst, src) in prev.iter_mut().zip(iv.iter()) {
+                *dst = *src;
+            }
             let mut out = Vec::with_capacity(padded_len);
             for blk in data.chunks(bs) {
                 let x: Vec<u8> = blk.iter().zip(prev.iter()).map(|(a, b)| a ^ b).collect();
@@ -95,7 +101,12 @@ pub fn aes_cbc_encrypt(key: &[u8], iv: &[u8], plain: &[u8]) -> Vec<u8> {
         16 => run!(aes::Aes128),
         24 => run!(aes::Aes192),
         32 => run!(aes::Aes256),
-        _ => panic!("invalid aes key length"),
+        other => {
+            // 不 panic：调用方多是"尽力而为"的解密（例如上游返回了错误页），
+            // 抛出去在 JNI/FFI 边界上就是宿主进程 abort。
+            log::warn!("aes_cbc: unsupported key length {other}");
+            Vec::new()
+        }
     }
 }
 
@@ -107,9 +118,16 @@ pub fn aes_cbc_decrypt(key: &[u8], iv: &[u8], data: &[u8]) -> Vec<u8> {
         ($ty:ty) => {{
             let bs = <$ty as BlockSizeUser>::BlockSize::USIZE;
             let cipher = <$ty>::new_from_slice(key).expect("aes key");
-            let mut prev: Vec<u8> = iv.to_vec();
+            // 上游返回的密文长度不可信（错误页 / 被截断的 body 都可能出现）：
+            // 只处理完整的块，剩余不足一块的尾部直接丢弃。原实现
+            // `chunks(bs)` + `clone_from_slice(blk)` 在尾块不足时 panic，
+            // 而 release 是 panic=abort —— 会把宿主进程一起带走。
+            let mut prev: Vec<u8> = vec![0u8; bs];
+            for (dst, src) in prev.iter_mut().zip(iv.iter()) {
+                *dst = *src;
+            }
             let mut out = Vec::with_capacity(data.len());
-            for blk in data.chunks(bs) {
+            for blk in data.chunks_exact(bs) {
                 let in_ga = GenericArray::clone_from_slice(blk);
                 let mut dec_ga = GenericArray::clone_from_slice(&vec![0u8; bs]);
                 cipher.decrypt_block_b2b(&in_ga, &mut dec_ga);
@@ -131,7 +149,12 @@ pub fn aes_cbc_decrypt(key: &[u8], iv: &[u8], data: &[u8]) -> Vec<u8> {
         16 => run!(aes::Aes128),
         24 => run!(aes::Aes192),
         32 => run!(aes::Aes256),
-        _ => panic!("invalid aes key length"),
+        other => {
+            // 不 panic：调用方多是"尽力而为"的解密（例如上游返回了错误页），
+            // 抛出去在 JNI/FFI 边界上就是宿主进程 abort。
+            log::warn!("aes_cbc: unsupported key length {other}");
+            Vec::new()
+        }
     }
 }
 

@@ -1,8 +1,10 @@
-# Requires PowerShell 5.1+
+﻿# Requires PowerShell 5.1+
 [CmdletBinding()]
 param(
     [string]$MsvcRoot = "E:\project\build\VC\Tools\MSVC\14.51.36231",
-    [string]$SdkRoot = "C:\Program Files (x86)\Windows Kits\10"
+    [string]$SdkRoot = "C:\Program Files (x86)\Windows Kits\10",
+    # 目标架构：x86_64（默认）或 aarch64。决定 cargo --target 与 zip 内的 lib/<abi>/ 目录名。
+    [string]$Arch = "x86_64"
 )
 
 $ErrorActionPreference = "Stop"
@@ -63,29 +65,87 @@ $env:LIB = ($libList -join ";") + ";$env:LIB"
 
 # 4. Cargo build
 Write-Host "==> Building Release Dynamic Library..." -ForegroundColor Green
-cargo build --release --lib --features jni
+$target = if ($Arch -eq "aarch64") { "aarch64-pc-windows-msvc" } else { "x86_64-pc-windows-msvc" }
+cargo build --release --lib --features jni --target $target
+if ($LASTEXITCODE -ne 0) { throw "cargo build 失败（退出码 $LASTEXITCODE）" }
 
-$dll = "target\release\kugou_music_rs.dll"
+$dll = "target\$target\release\kugou_music_rs.dll"
 if (-not (Test-Path $dll)) {
     throw "Build output not found: $dll"
 }
 
 # 5. Packaging CPPlayer Module
+#    统一走 scripts/package_module.py：
+#      · manifest 以 packaging/manifest.json 为唯一数据源（不再在这里拼字段）
+#      · 输出用 Python json.dump，**没有 BOM、没有尾逗号**
+#    以前这里用 ConvertTo-Json 写 manifest，PS 5.1 会带 UTF-8 BOM，历史上还产出过
+#    尾逗号 —— 宿主 kotlinx.serialization 直接解析失败，模块表现为"导入失败/不显示"。
 Write-Host "==> Packaging CPPlayer Module..." -ForegroundColor Green
-$stagingDir = Join-Path $Root "target\cp_module\windows"
-if (Test-Path $stagingDir) { Remove-Item -Recurse -Force $stagingDir }
-New-Item -ItemType Directory -Path (Join-Path $stagingDir "lib\x86_64") -Force | Out-Null
 
-Copy-Item $dll -Destination (Join-Path $stagingDir "lib\x86_64\kugou_music_rs.dll")
-Copy-Item $dll -Destination (Join-Path $stagingDir "kugou_music_rs.dll")
+# 优先用 scripts/package_module.py（与 CI 完全同一条路径）。
+# 找一个**真的能用**的 Python：PATH 里排在前面的
+# %LOCALAPPDATA%\Microsoft\WindowsApps\python.exe 是应用商店占位符，未安装时
+# 一执行就返回 9009 —— 会被误读成"打包失败"。
+function Resolve-Python {
+    $candidates = @()
+    if ($env:PYTHON) { $candidates += $env:PYTHON }
+    foreach ($name in @("python", "python3", "py")) {
+        $cmd = Get-Command $name -ErrorAction SilentlyContinue
+        if ($cmd -and $cmd.Source) { $candidates += $cmd.Source }
+    }
+    $candidates += Get-ChildItem "$env:LOCALAPPDATA\Programs\Python\*\python.exe" -ErrorAction SilentlyContinue |
+        Select-Object -ExpandProperty FullName
 
-$manifestPath = Join-Path $Root "packaging\manifest.json"
-$manifestJson = Get-Content $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
-$manifestJson.entryPoint = "kugou_music_rs.dll"
-$manifestJson | ConvertTo-Json -Depth 10 | Set-Content (Join-Path $stagingDir "manifest.json") -Encoding UTF8
+    foreach ($exe in $candidates) {
+        if (-not (Test-Path $exe)) { continue }
+        & $exe -c "import sys" 2>$null 1>$null
+        if ($LASTEXITCODE -eq 0) { return $exe }
+    }
+    return $null
+}
 
 $outZip = Join-Path $Root "target\kugou-music-rs-windows.zip"
-if (Test-Path $outZip) { Remove-Item -Force $outZip }
-Compress-Archive -Path "$stagingDir\*" -DestinationPath $outZip -Force
+$python = Resolve-Python
+
+if ($python) {
+    Write-Host "    using python: $python" -ForegroundColor DarkGray
+    & $python (Join-Path $Root "scripts\package_module.py") `
+        --platform windows `
+        --lib "$Arch=$dll" `
+        --out $outZip
+    if ($LASTEXITCODE -ne 0) { throw "打包失败: package_module.py 退出码 $LASTEXITCODE" }
+} else {
+    # 无 Python 时的原生兜底。要点：**显式 UTF8 无 BOM**。
+    # 原先用 `Set-Content -Encoding UTF8`，PS 5.1 会写入 BOM，宿主
+    # kotlinx.serialization 解析直接失败（模块导入即失败/不显示）。
+    Write-Host "    python 不可用，改用内置打包器" -ForegroundColor DarkYellow
+
+    $stagingDir = Join-Path $Root "target\cp_module\windows"
+    if (Test-Path $stagingDir) { Remove-Item -Recurse -Force $stagingDir }
+    New-Item -ItemType Directory -Path (Join-Path $stagingDir "lib\$Arch") -Force | Out-Null
+    Copy-Item $dll -Destination (Join-Path $stagingDir "lib\$Arch\kugou_music_rs.dll")
+    Copy-Item $dll -Destination (Join-Path $stagingDir "kugou_music_rs.dll")
+
+    $manifest = Get-Content (Join-Path $Root "packaging\manifest.json") -Raw -Encoding UTF8 | ConvertFrom-Json
+    $manifest.entryPoint = "kugou_music_rs.dll"
+    $manifest.supportedAbis = @($Arch)
+    $json = $manifest | ConvertTo-Json -Depth 10
+
+    # 尾逗号是非法 JSON，但 PS 的 ConvertFrom-Json 有时会放过；先自查再用严格解析。
+    if ($json -match ',\s*[}\]]') {
+        throw "生成的 manifest.json 含尾逗号（非法 JSON），请安装 Python 3 后重试。"
+    }
+    $outPath = Join-Path $stagingDir "manifest.json"
+    [IO.File]::WriteAllText($outPath, $json, (New-Object System.Text.UTF8Encoding($false)))
+
+    $bytes = [IO.File]::ReadAllBytes($outPath)
+    if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+        throw "manifest.json 带 BOM，宿主会解析失败。"
+    }
+    Get-Content $outPath -Raw | ConvertFrom-Json | Out-Null
+
+    if (Test-Path $outZip) { Remove-Item -Force $outZip }
+    Compress-Archive -Path "$stagingDir\*" -DestinationPath $outZip -Force
+}
 
 Write-Host "`n[SUCCESS] Windows module packaged successfully at target/kugou-music-rs-windows.zip" -ForegroundColor Green

@@ -4,7 +4,7 @@
 //! docs/superpowers/plans/2026-09-18-comment-send.md 第 0 节。
 //! 任何签名/参数改动都必须能解释这些值为何不变。
 
-use kugou_server::modules::comment_send::{
+use kugou_music_rs::modules::comment_send::{
     del_options, extract_resolved_resource, floor_tid, identity, reply_options,
     reply_quote_fields, resolve_code, send_options, with_quote_suffix, ALBUM_CODE, PLAYLIST_CODE,
     SONG_CODE,

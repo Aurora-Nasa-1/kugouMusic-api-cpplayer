@@ -202,6 +202,166 @@ impl DeviceConfig {
     }
 }
 
+// ---------------------------------------------------------------------------
+// 嵌入式（JNI）运行时的可写目录与设备注册
+//
+// 原 JS 版是长驻 HTTP 服务：带 data_dir 启动，前端在登录/播放前先调
+// `/register/dev` 拿 dfid。CPPlayer-KMP 走进程内 JNI，**没有**这两个前提：
+//   · 没有 data_dir（宿主只给 host/port），device_info.json 无处可落；
+//   · 不会调 `/register/dev`（宿主的 API 方法表里没有这个端点）。
+// 结果就是 dfid 恒为 "-"，`/v5/url` 一律 502 —— 现象是"能搜到歌，但一放就失败"。
+// 这里补上：懒注册 + 落盘复用。
+// ---------------------------------------------------------------------------
+
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use std::time::{Duration, Instant};
+
+/// 模块可写目录（进程级）。JNI 侧会用 `java.io.tmpdir` 覆盖它 ——
+/// Android 上那是应用私有的 cache 目录（可写），桌面上是系统临时目录。
+static DATA_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+/// 注册串行锁：并发首调（搜索 + 播放同时打进来）只允许一个线程去注册，
+/// 否则会向上游登记出多台"设备"。
+static REGISTER_LOCK: Mutex<()> = Mutex::new(());
+static LAST_ATTEMPT: Mutex<Option<Instant>> = Mutex::new(None);
+/// 注册失败后的重试间隔（网络不好时别每次调用都去撞上游）。
+const REGISTER_RETRY: Duration = Duration::from_secs(60);
+
+/// 注册成功的进程级标记，命中后热路径只读一个原子变量。
+static REGISTERED: AtomicBool = AtomicBool::new(false);
+
+/// 覆盖模块数据目录（JNI 初始化时调用）。
+pub fn set_data_dir(dir: &str) {
+    if dir.trim().is_empty() {
+        return;
+    }
+    let mut guard = DATA_DIR.lock().unwrap_or_else(|e| e.into_inner());
+    *guard = Some(PathBuf::from(dir));
+}
+
+/// 模块数据目录。优先级：JNI 注入 > `KUGOU_MUSIC_DATA_DIR` > 系统临时目录。
+pub fn data_dir() -> PathBuf {
+    if let Some(dir) = DATA_DIR.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+        return dir;
+    }
+    if let Ok(dir) = std::env::var("KUGOU_MUSIC_DATA_DIR") {
+        if !dir.trim().is_empty() {
+            let p = PathBuf::from(dir);
+            let _ = std::fs::create_dir_all(&p);
+            return p;
+        }
+    }
+    let p = std::env::temp_dir().join("kugou-music-rs");
+    let _ = std::fs::create_dir_all(&p);
+    p
+}
+
+fn is_valid_dfid(dfid: &str) -> bool {
+    !dfid.is_empty() && dfid != "-"
+}
+
+/// 把设备身份并入 cookie 对象（宿主不注入 cookie 时的兜底）。
+///
+/// 部分模块（如 `/v1/audio/audio`）从 `cookie` 里读 `dfid` / `KUGOU_API_MID`，
+/// JS 版由 App 注入；JNI 宿主没有这一步，缺了就签名校验失败。
+pub fn merge_device_identity(cookie: &mut Value) {
+    ensure_registered();
+    let info = DeviceConfig::instance().get_device_info();
+    let Some(map) = cookie.as_object_mut() else {
+        return;
+    };
+    for (cookie_key, info_key) in [
+        ("dfid", "dfid"),
+        ("KUGOU_API_MID", "mid"),
+        ("uuid", "uuid"),
+        ("KUGOU_API_GUID", "guid"),
+    ] {
+        let empty = map
+            .get(cookie_key)
+            .map(|v| v.as_str().map(|s| s.is_empty()).unwrap_or(false) || v.is_null())
+            .unwrap_or(true);
+        if empty {
+            if let Some(v) = info.get(info_key) {
+                let s = v.as_str().unwrap_or("");
+                if !s.is_empty() && s != "-" {
+                    map.insert(cookie_key.to_string(), json!(s));
+                }
+            }
+        }
+    }
+}
+
+/// 确保拿到 dfid（设备身份）。幂等、带节流，失败也不向上抛 ——
+/// 搜索等不依赖 dfid 的接口不应该因为注册失败而整体不可用。
+pub fn ensure_registered() {
+    if REGISTERED.load(AtomicOrdering::Acquire) {
+        return;
+    }
+    if is_valid_dfid(&DeviceConfig::instance().get_dfid()) {
+        REGISTERED.store(true, AtomicOrdering::Release);
+        return;
+    }
+
+    // 串行化：并发首调只让一个线程真正去注册。
+    let _guard = REGISTER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    if is_valid_dfid(&DeviceConfig::instance().get_dfid()) {
+        REGISTERED.store(true, AtomicOrdering::Release);
+        return;
+    }
+
+    let dir = data_dir();
+
+    // 1) 复用上次落盘的设备身份（冷启动最常见路径，零网络开销）。
+    if DeviceConfig::instance().load_cached(&dir.to_string_lossy()) {
+        if is_valid_dfid(&DeviceConfig::instance().get_dfid()) {
+            log::info!("device identity restored from {}", dir.display());
+            REGISTERED.store(true, AtomicOrdering::Release);
+            return;
+        }
+    }
+
+    // 2) 节流：失败后 REGISTER_RETRY 内不再重试。
+    {
+        let mut last = LAST_ATTEMPT.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(t) = *last {
+            if t.elapsed() < REGISTER_RETRY {
+                return;
+            }
+        }
+        *last = Some(Instant::now());
+    }
+
+    // 3) 真正去上游注册。register_dev 内部会缓存/复用 dfid，重复调用是幂等的。
+    let ctx = crate::modules::Ctx {
+        ip: String::new(),
+        body_bytes: None,
+    };
+    match crate::modules::register_dev::handle(&serde_json::json!({}), &ctx) {
+        Ok(resp) => {
+            let body = resp.body.to_json();
+            match body
+                .get("data")
+                .and_then(|d| d.get("dfid"))
+                .and_then(|v| v.as_str())
+            {
+                Some(dfid) if is_valid_dfid(dfid) => {
+                    DeviceConfig::instance().set_dfid(dfid);
+                    DeviceConfig::instance().save(&dir.to_string_lossy(), dfid, None);
+                    REGISTERED.store(true, AtomicOrdering::Release);
+                    log::info!("device registered: dfid={dfid} (saved to {})", dir.display());
+                }
+                _ => log::warn!(
+                    "register/dev returned no dfid: {}",
+                    body.to_string().chars().take(200).collect::<String>()
+                ),
+            }
+        }
+        Err(err) => log::warn!("register/dev failed: status {}", err.status),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

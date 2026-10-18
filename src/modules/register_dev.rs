@@ -10,7 +10,14 @@ use serde_json::{json, Map, Value};
 pub fn handle(q: &Value, ctx: &Ctx) -> Result<ModuleResponse, ModuleResponse> {
     let userid = param_or_cookie_num(q, "userid", 0);
     let token = param_or_cookie_str(q, "token", "");
-    let guid = c_str(q, "KUGOU_API_GUID");
+    // JS 版里 KUGOU_API_GUID 由宿主（App）注入 cookie。CPPlayer-KMP 走 JNI，
+    // 没有这一步 —— 缺 guid 时上游直接回 `{"status":0,"data":"not.uuid","error_code":20010}`，
+    // 设备注册永远失败，dfid 恒为 "-"，后续 /v5/url 一律 502。
+    // 本地 DeviceConfig 本来就会生成并持久化 guid/mid/uuid，这里作为兜底。
+    let mut guid = c_str(q, "KUGOU_API_GUID");
+    if guid.is_empty() {
+        guid = DeviceConfig::instance().get_guid();
+    }
 
     // Idempotent device registration: once a dfid has been obtained and
     // persisted (device_info.json), reuse it locally instead of re-proxying
@@ -64,6 +71,14 @@ pub fn handle(q: &Value, ctx: &Ctx) -> Result<ModuleResponse, ModuleResponse> {
     }
     if let Some(v) = param_or_cookie_guid(q, "uuid", &guid) {
         dm.insert("uuid".to_string(), json!(v));
+    }
+    // uuid 必须是 32 位十六进制（上游校验 "not.uuid"）。宿主不注入时用
+    // DeviceConfig 里由 dfid/mid 派生的值。
+    if !dm.contains_key("uuid") {
+        dm.insert(
+            "uuid".to_string(),
+            json!(DeviceConfig::instance().get_uuid()),
+        );
     }
 
     let data_json = json_stringify(&Value::Object(dm));

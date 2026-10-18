@@ -28,7 +28,7 @@
 //! 3. **源码级**断言所有 `userid` 解析点都带显式类型标注 ——
 //!    隐式写法一旦回流，编译期不会报错、运行期静默返0，只能靠这个测试拦。
 
-use kugou_server::modules::{param_or_cookie_num, q_num, q_str};
+use kugou_music_rs::modules::{param_or_cookie_num, q_num, q_str};
 use serde_json::json;
 
 /// 报告里出现的真实 userid（微信号注册），恰好越过 i32 边界。

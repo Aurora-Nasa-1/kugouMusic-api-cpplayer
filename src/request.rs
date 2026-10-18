@@ -619,7 +619,14 @@ pub fn create_request(opts: &RequestOptions) -> Result<ModuleResponse, ModuleRes
     if opts.encrypt_key {
         let hash = js_string(params.get("hash"));
         let p_mid = js_string(params.get("mid"));
-        let p_uid = js_string(params.get("userid"));
+        // 未登录时 params 里没有 userid。原实现直接 js_string(None) → 字符串
+        // "undefined"，于是 key = md5(hash+SALT+appid+mid+"undefined") —— 上游
+        // /v5/url 一律返回 `{"error_code":31833,"error":"illegal key"}`（HTTP 502），
+        // 表现就是"能搜到歌，一播放就失败"。缺省必须按 0 参与签名。
+        let p_uid = match params.get("userid") {
+            Some(Value::Null) | None => "0".to_string(),
+            Some(v) => js_string(Some(v)),
+        };
         let p_appid = js_string(params.get("appid"));
         let key = helper::sign_key(&hash, &p_mid, &p_uid, &p_appid);
         params

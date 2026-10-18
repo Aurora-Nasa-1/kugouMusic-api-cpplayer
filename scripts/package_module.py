@@ -65,6 +65,51 @@ def read_crate_version(root: str) -> str:
     return "0.1.0"
 
 
+def load_base_manifest(root: str) -> dict:
+    """读取 packaging/manifest.json 作为唯一数据源。
+
+    历史上这里把 manifest 字段硬编码在脚本里，导致 `packaging/manifest.json` 与
+    实际包内清单长期漂移（新增 `minHostApiVersion` 时只改了一边）。现在以仓库里的
+    manifest 为基座，脚本只覆盖与产物强相关的字段。
+    """
+    path = os.path.join(root, "packaging", "manifest.json")
+    try:
+        # utf-8-sig：允许被记事本改过、带 BOM 的文件
+        with open(path, encoding="utf-8-sig") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        die(f"缺少模块清单基座: {path}")
+    except json.JSONDecodeError as e:
+        die(f"模块清单不是合法 JSON: {path}: {e}")
+    if not isinstance(data, dict):
+        die(f"模块清单根节点必须是对象: {path}")
+    return data
+
+
+def write_manifest(path: str, manifest: dict) -> None:
+    """写 manifest.json 并自检。
+
+    宿主（CPPlayer-KMP）用 kotlinx.serialization 直接解析该文件，**不接受 BOM、
+    注释、尾逗号**。所以这里既不手写字符串，也不依赖 shell/PS 的 JSON 序列化
+    （PS 5.1 的 ConvertTo-Json 会带 BOM，历史上还产出过尾逗号，直接导致模块
+    "导入失败/不显示"）。统一 json.dump 之后回读校验。
+    """
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+
+    raw = open(path, "rb").read()
+    if raw.startswith(b"\xef\xbb\xbf"):
+        die("manifest.json 带 UTF-8 BOM，CPPlayer 宿主会解析失败")
+    try:
+        parsed = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+        die(f"manifest.json 自检失败: {e}")
+    for key in ("id", "name", "version", "type", "entryPoint"):
+        if not parsed.get(key):
+            die(f"manifest.json 缺少必需字段: {key}")
+
+
 def parse_lib_args(pairs: list[str]) -> list[tuple[str, str]]:
     out = []
     for item in pairs:
@@ -84,9 +129,14 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="打包 CPPlayer JNI 模块 zip (Standard v3)")
     parser.add_argument(
         "--platform",
-        required=True,
+        required=False,
         choices=sorted(EXPECTED_SUFFIX),
         help="目标平台，决定产物后缀与 zip 命名",
+    )
+    parser.add_argument(
+        "--validate-only",
+        action="store_true",
+        help="只校验 packaging/manifest.json（不打包），CI 用",
     )
     parser.add_argument(
         "--lib",
@@ -95,8 +145,8 @@ def main() -> int:
         metavar="ABI=PATH",
         help="待打包的动态库，可重复传入多架构",
     )
-    parser.add_argument("--module-id", default=DEFAULT_ID, help="manifest 的 id")
-    parser.add_argument("--name", default=DEFAULT_NAME, help="manifest 的 name")
+    parser.add_argument("--module-id", default=None, help="覆盖 manifest 的 id（默认取 packaging/manifest.json）")
+    parser.add_argument("--name", default=None, help="覆盖 manifest 的 name（默认取 packaging/manifest.json）")
     parser.add_argument("--version", default=None, help="manifest 版本，默认读 Cargo.toml")
     parser.add_argument(
         "--expected-version",
@@ -116,6 +166,28 @@ def main() -> int:
     args = parser.parse_args()
 
     root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+    if args.validate_only:
+        base = load_base_manifest(root)
+        # 与宿主 ModuleManifest 的必填项保持一致，另外把 CI 最容易漏的
+        # 「version 与 Cargo.toml 漂移」也一起查掉。
+        for key in ("id", "name", "version", "type", "entryPoint"):
+            if not base.get(key):
+                die(f"packaging/manifest.json 缺少必需字段: {key}")
+        if base.get("type") != "jni":
+            die(f"packaging/manifest.json 的 type 必须是 jni，收到 {base.get('type')!r}")
+        crate = read_crate_version(root)
+        if base.get("version") != crate:
+            die(f"版本漂移：manifest={base.get('version')} Cargo.toml={crate}")
+        print(
+            f"OK packaging/manifest.json  id={base['id']} version={base['version']} "
+            f"contract={base.get('contract')} minHostApiVersion={base.get('minHostApiVersion')}"
+        )
+        return 0
+
+    if not args.platform:
+        die("缺少 --platform（或用 --validate-only 只校验清单）")
+
     entries = parse_lib_args(args.lib)
 
     if args.expected_version:
@@ -166,46 +238,24 @@ def main() -> int:
         print(f"  + {entry_point}  (根目录兼容)")
 
     version = args.version or read_crate_version(root)
-    manifest = {
-        "id": args.module_id,
-        "name": args.name,
-        "version": version,
-        "type": "jni",
-        "entryPoint": entry_point,
-        "contract": "standard",
-        "capabilities": [
-            "search",
-            "playback",
-            "lyricsSearch",
-            "qrLogin",
-            "charts",
-        ],
-        "loginMethods": ["qr", "cookie"],
-        "targetAppPackage": "com.kugou.android",
-        "supportedAbis": abis,
-        "apiMap": {
-            "cloudsearch": "search",
-            "song/url/v1": "song/url",
-            "song/url/v1/302": "song/url",
-            "song/download/url/v1": "song/url",
-            "lyric/new": "lyric",
-            "song/detail": "song/detail",
-            "search/hot/detail": "search/hot",
-            "search/suggest": "search/suggest",
-            "toplist": "toplist",
-            "toplist/detail": "toplist",
-            "login/qr/key": "login/qr/key",
-            "login/qr/create": "login/qr/create",
-            "login/qr/check": "login/qr/check",
-            "login/status": "login/status",
-        },
-    }
+
+    manifest = load_base_manifest(root)
+    # 与产物强相关的字段由脚本决定；capabilities / apiMap / minHostApiVersion
+    # 等一律沿用 packaging/manifest.json，避免两处维护、悄悄漂移。
+    manifest["id"] = args.module_id or manifest.get("id") or DEFAULT_ID
+    manifest["name"] = args.name or manifest.get("name") or DEFAULT_NAME
+    manifest["version"] = version
+    manifest["type"] = "jni"
+    manifest["entryPoint"] = entry_point
+    manifest["supportedAbis"] = abis
+    manifest.setdefault("contract", "standard")
 
     manifest_path = os.path.join(staging, "manifest.json")
-    with open(manifest_path, "w", encoding="utf-8", newline="") as f:
-        json.dump(manifest, f, ensure_ascii=False, indent=2)
-        f.write("\n")
-    print(f"  + manifest.json  id={manifest['id']} version={version} abis={abis} contract=standard")
+    write_manifest(manifest_path, manifest)
+    print(
+        f"  + manifest.json  id={manifest['id']} version={version} "
+        f"abis={abis} contract={manifest.get('contract')}"
+    )
 
     if os.path.exists(out_zip):
         os.remove(out_zip)

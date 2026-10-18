@@ -11,10 +11,10 @@ static SERVER_LOCK: Mutex<()> = Mutex::new(());
 /// RSA 常量（PUBLIC_LITE_RAS_KEY）经 pem-rfc7468 解析必须成功（回归：单行长 base64 曾导致 panic）。
 #[test]
 fn rsa_keys_parse() {
-    assert_eq!(kugou_server::crypto::crypto_rsa_encrypt(r#"{"a":1}"#, None).len(), 256);
-    assert_eq!(kugou_server::crypto::rsa_encrypt2(r#"{"a":1}"#).len(), 256);
+    assert_eq!(kugou_music_rs::crypto::crypto_rsa_encrypt(r#"{"a":1}"#, None).len(), 256);
+    assert_eq!(kugou_music_rs::crypto::rsa_encrypt2(r#"{"a":1}"#).len(), 256);
     assert_eq!(
-        kugou_server::crypto::crypto_rsa_encrypt(r#"{"a":1}"#, Some(kugou_server::crypto::PUBLIC_RAS_KEY)).len(),
+        kugou_music_rs::crypto::crypto_rsa_encrypt(r#"{"a":1}"#, Some(kugou_music_rs::crypto::PUBLIC_RAS_KEY)).len(),
         256
     );
 }
@@ -24,7 +24,7 @@ fn rsa_keys_parse() {
 /// panic，SSA 反作弊重试一触发即崩溃（release panic=abort 会挂掉整个 App）。
 #[test]
 fn simulate_rsa_key_parses() {
-    let sim = kugou_server::simulate::generate_simulate("123", "456", "dfid", Some("webgl"));
+    let sim = kugou_music_rs::simulate::generate_simulate("123", "456", "dfid", Some("webgl"));
     assert!(!sim.edt.is_empty());
     assert!(!sim.sid.is_empty());
 }
@@ -34,7 +34,7 @@ fn simulate_rsa_key_parses() {
 /// singer → k 为 singerid、v 为 `{"n":名,"t":秒}`；items 参数（合法数组）原样优先。
 #[test]
 fn blacklist_items_build() {
-    use kugou_server::modules::blacklist::build_items;
+    use kugou_music_rs::modules::blacklist::build_items;
     use serde_json::json;
 
     // song 单条：hash 大写入参 → 小写 k；v 内 n/m/t 顺序与 JS 对象插入序一致
@@ -70,7 +70,7 @@ fn blacklist_items_build() {
 /// 先于客户端 dio 15s 放弃，避免「客户端已超时、服务器继续空转」的空耗。
 #[test]
 fn request_options_timeout_secs() {
-    use kugou_server::request::RequestOptions;
+    use kugou_music_rs::request::RequestOptions;
     let default = RequestOptions::new("/v2/get_grade_info");
     assert_eq!(default.timeout_secs, None);
     let tightened = RequestOptions::new("/v2/get_grade_info").timeout_secs(8);
@@ -83,7 +83,7 @@ fn request_options_timeout_secs() {
 /// 与 JS `JSON.stringify` 逐字节一致（强转 i64 曾导致鉴权明文不一致）。
 #[test]
 fn q_raw_or_nullish_semantics() {
-    use kugou_server::modules::q_raw_or;
+    use kugou_music_rs::modules::q_raw_or;
     use serde_json::json;
 
     let q = json!({ "page": "1", "pagesize": "100", "null_field": null });
@@ -106,7 +106,7 @@ fn q_raw_or_nullish_semantics() {
 fn aes_cbc_matches_cryptojs() {
     let plain = br#"{"singerid":1001,"token":"FAKETOKEN123"}"#;
     // key = "abcdefghijklmnopqrstuvwxyz012345", iv = "0123456789abcdef"
-    let (hex256, _) = kugou_server::crypto::crypto_aes_encrypt(
+    let (hex256, _) = kugou_music_rs::crypto::crypto_aes_encrypt(
         r#"{"singerid":1001,"token":"FAKETOKEN123"}"#,
         Some("abcdefghijklmnopqrstuvwxyz012345"),
         Some("0123456789abcdef"),
@@ -115,7 +115,7 @@ fn aes_cbc_matches_cryptojs() {
         hex256,
         "f76670ed7f17048aab6bfe2e0e172c94b0ba4f9ad9e8fb21283d3bc5f9188f17f49e3a9ed4a2022e63adae456b40ec5f"
     );
-    let (hex128, _) = kugou_server::crypto::crypto_aes_encrypt(
+    let (hex128, _) = kugou_music_rs::crypto::crypto_aes_encrypt(
         r#"{"singerid":1001,"token":"FAKETOKEN123"}"#,
         Some("0123456789abcdef"),
         Some("fedcba9876543210"),
@@ -125,8 +125,8 @@ fn aes_cbc_matches_cryptojs() {
         "2ee307f47c1ddbb97b5495529ade9833043649393492ad4a55fce62f308c965094261211eac644d5690463d935855b1b"
     );
     // roundtrip
-    let ct = kugou_server::crypto::hex_to_bytes(&hex256);
-    let pt = kugou_server::crypto::aes_cbc_decrypt(
+    let ct = kugou_music_rs::crypto::hex_to_bytes(&hex256);
+    let pt = kugou_music_rs::crypto::aes_cbc_decrypt(
         b"abcdefghijklmnopqrstuvwxyz012345",
         b"0123456789abcdef",
         &ct,
@@ -153,7 +153,7 @@ fn server_responds_404_and_cors() {
     let _guard = SERVER_LOCK.lock().unwrap();
     let port: u16 = 18080;
     let dir = std::env::temp_dir().join("kugou_smoke").to_string_lossy().into_owned();
-    assert_eq!(kugou_server::server::start(port, dir), Some(port));
+    assert_eq!(kugou_music_rs::server::start(port, dir), Some(port));
 
     // 404 fallback: Cannot GET /nonexistent
     let resp = tcp_request(port, "GET /nonexistent HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
@@ -289,7 +289,7 @@ fn server_responds_404_and_cors() {
         resp
     );
 
-    kugou_server::server::stop();
+    kugou_music_rs::server::stop();
 }
 
 /// 用户资料修改与头像上传（user_update.js / user_update_avatar.js 的移植）：
@@ -305,7 +305,7 @@ fn user_update_and_avatar_validation() {
         .join("kugou_smoke")
         .to_string_lossy()
         .into_owned();
-    assert_eq!(kugou_server::server::start(port, dir), Some(port));
+    assert_eq!(kugou_music_rs::server::start(port, dir), Some(port));
 
     let post = |path: &str, body: &str| {
         let raw = format!(
@@ -353,7 +353,7 @@ fn user_update_and_avatar_validation() {
         resp
     );
 
-    kugou_server::server::stop();
+    kugou_music_rs::server::stop();
 }
 
 /// 动态封面媒体代理：缺 album_audio_id → 400；上游不可达/无动态封面 → 502。
@@ -363,7 +363,7 @@ fn dycover_media_proxy_validation() {
     let _guard = SERVER_LOCK.lock().unwrap();
     let port: u16 = 18082;
     let dir = std::env::temp_dir().join("kugou_smoke_media").to_string_lossy().into_owned();
-    assert_eq!(kugou_server::server::start(port, dir), Some(port));
+    assert_eq!(kugou_music_rs::server::start(port, dir), Some(port));
 
     // 缺参 → 400，且 body 是 JSON（不是 HTML 404 页）
     let resp = tcp_request(
@@ -385,7 +385,7 @@ fn dycover_media_proxy_validation() {
         resp
     );
 
-    kugou_server::server::stop();
+    kugou_music_rs::server::stop();
 }
 
 /// 随机端口模式（port==0）：必须返回非 0 端口，且该端口可连通；连续启动几次
@@ -395,14 +395,14 @@ fn server_starts_on_random_port() {
     let _guard = SERVER_LOCK.lock().unwrap();
     let dir = std::env::temp_dir().join("kugou_smoke_rand").to_string_lossy().into_owned();
     for _ in 0..3 {
-        let port = kugou_server::server::start(0, dir.clone()).expect("random start");
+        let port = kugou_music_rs::server::start(0, dir.clone()).expect("random start");
         assert!((10000..=60000).contains(&port), "port out of range: {port}");
         let resp = tcp_request(
             port,
             "GET /nonexistent HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
         );
         assert!(resp.contains("404 Not Found"), "got: {}", resp);
-        kugou_server::server::stop();
+        kugou_music_rs::server::stop();
     }
 }
 
@@ -419,15 +419,15 @@ fn server_stop_joins_listener_and_restart_isolated() {
     let port = 18083;
 
     for _ in 0..50 {
-        assert_eq!(kugou_server::server::start(port, dir.clone()), Some(port));
-        assert!(kugou_server::server::is_running());
-        assert_eq!(kugou_server::server::get_port(), port);
+        assert_eq!(kugou_music_rs::server::start(port, dir.clone()), Some(port));
+        assert!(kugou_music_rs::server::is_running());
+        assert_eq!(kugou_music_rs::server::get_port(), port);
         // 幂等启动应返回同一代端口，而不是额外创建 listener。
-        assert_eq!(kugou_server::server::start(0, dir.clone()), Some(port));
+        assert_eq!(kugou_music_rs::server::start(0, dir.clone()), Some(port));
 
-        kugou_server::server::stop();
-        assert!(!kugou_server::server::is_running());
-        assert_eq!(kugou_server::server::get_port(), 0);
+        kugou_music_rs::server::stop();
+        assert!(!kugou_music_rs::server::is_running());
+        assert_eq!(kugou_music_rs::server::get_port(), 0);
         let probe = TcpListener::bind(("127.0.0.1", port))
             .expect("stop 返回后旧 listener 必须已释放端口");
         drop(probe);
@@ -446,13 +446,13 @@ fn server_start_fails_when_fixed_port_is_occupied_then_recovers() {
         .to_string_lossy()
         .into_owned();
 
-    assert_eq!(kugou_server::server::start(port, dir.clone()), None);
-    assert!(!kugou_server::server::is_running());
-    assert_eq!(kugou_server::server::get_port(), 0);
+    assert_eq!(kugou_music_rs::server::start(port, dir.clone()), None);
+    assert!(!kugou_music_rs::server::is_running());
+    assert_eq!(kugou_music_rs::server::get_port(), 0);
 
     drop(occupied);
-    assert_eq!(kugou_server::server::start(port, dir), Some(port));
-    kugou_server::server::stop();
+    assert_eq!(kugou_music_rs::server::start(port, dir), Some(port));
+    kugou_music_rs::server::stop();
     assert!(TcpListener::bind(("127.0.0.1", port)).is_ok());
 }
 
@@ -477,9 +477,9 @@ fn concurrent_start_stop_keeps_one_consistent_generation() {
                 barrier.wait();
                 for round in 0..4 {
                     if (worker + round) % 2 == 0 {
-                        assert_eq!(kugou_server::server::start(port, dir.clone()), Some(port));
+                        assert_eq!(kugou_music_rs::server::start(port, dir.clone()), Some(port));
                     } else {
-                        kugou_server::server::stop();
+                        kugou_music_rs::server::stop();
                     }
                 }
             })
@@ -489,9 +489,9 @@ fn concurrent_start_stop_keeps_one_consistent_generation() {
     for thread in threads {
         thread.join().expect("concurrent lifecycle worker panicked");
     }
-    kugou_server::server::stop();
-    assert!(!kugou_server::server::is_running());
-    assert_eq!(kugou_server::server::get_port(), 0);
+    kugou_music_rs::server::stop();
+    assert!(!kugou_music_rs::server::is_running());
+    assert_eq!(kugou_music_rs::server::get_port(), 0);
     assert!(TcpListener::bind(("127.0.0.1", port)).is_ok());
 }
 
@@ -506,7 +506,7 @@ fn stop_joins_listener_without_waiting_for_slow_request_body() {
         .join("kugou_smoke_slow_request_stop")
         .to_string_lossy()
         .into_owned();
-    assert_eq!(kugou_server::server::start(port, dir), Some(port));
+    assert_eq!(kugou_music_rs::server::start(port, dir), Some(port));
 
     let mut client = TcpStream::connect(("127.0.0.1", port)).expect("connect to server");
     client
@@ -516,28 +516,28 @@ fn stop_joins_listener_without_waiting_for_slow_request_body() {
         .expect("send headers without completing body");
 
     let request_deadline = Instant::now() + Duration::from_secs(2);
-    while kugou_server::server::active_request_count() == 0 && Instant::now() < request_deadline {
+    while kugou_music_rs::server::active_request_count() == 0 && Instant::now() < request_deadline {
         std::thread::sleep(Duration::from_millis(10));
     }
-    assert_eq!(kugou_server::server::active_request_count(), 1);
+    assert_eq!(kugou_music_rs::server::active_request_count(), 1);
 
     let stop_started = Instant::now();
-    kugou_server::server::stop();
+    kugou_music_rs::server::stop();
     assert!(
         stop_started.elapsed() < Duration::from_secs(1),
         "stop waited for request-body processing instead of only joining listener"
     );
-    assert_eq!(kugou_server::server::active_request_count(), 1);
+    assert_eq!(kugou_music_rs::server::active_request_count(), 1);
 
     client.shutdown(Shutdown::Both).expect("release slow request");
     drop(client);
     let request_exit_deadline = Instant::now() + Duration::from_secs(2);
-    while kugou_server::server::active_request_count() != 0
+    while kugou_music_rs::server::active_request_count() != 0
         && Instant::now() < request_exit_deadline
     {
         std::thread::sleep(Duration::from_millis(10));
     }
-    assert_eq!(kugou_server::server::active_request_count(), 0);
+    assert_eq!(kugou_music_rs::server::active_request_count(), 0);
 }
 
 #[test]
@@ -552,11 +552,11 @@ fn stopped_generation_port_does_not_reach_restarted_server() {
         .to_string_lossy()
         .into_owned();
     assert_eq!(
-        kugou_server::server::start(old_port, dir.clone()),
+        kugou_music_rs::server::start(old_port, dir.clone()),
         Some(old_port)
     );
-    kugou_server::server::stop();
-    assert_eq!(kugou_server::server::start(new_port, dir), Some(new_port));
+    kugou_music_rs::server::stop();
+    assert_eq!(kugou_music_rs::server::start(new_port, dir), Some(new_port));
 
     let old_address = SocketAddr::from(([127, 0, 0, 1], old_port));
     assert!(TcpStream::connect_timeout(&old_address, Duration::from_millis(200)).is_err());
@@ -565,7 +565,7 @@ fn stopped_generation_port_does_not_reach_restarted_server() {
         "GET /nonexistent HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
     );
     assert!(response.contains("404 Not Found"), "got: {response}");
-    kugou_server::server::stop();
+    kugou_music_rs::server::stop();
 }
 
 /// /song/url/new 的音质挑选。上游请求体不带 quality，所以响应里的 url 有两种语义：
@@ -574,7 +574,7 @@ fn stopped_generation_port_does_not_reach_restarted_server() {
 /// 回归：Dart 侧曾把请求值当成实际音质，导致没有 Hi-Res 音源时 UI 仍显示 Hi-Res。
 #[test]
 fn song_url_new_picks_actual_quality() {
-    use kugou_server::modules::song_url_new::apply_quality;
+    use kugou_music_rs::modules::song_url_new::apply_quality;
     use serde_json::json;
 
     // 多链接且目标档位可用 → 取该档位，音质即请求值
@@ -675,7 +675,7 @@ fn register_dev_reuses_persisted_identity_without_upstream() {
     );
     std::fs::write(&file, seeded).unwrap();
 
-    assert_eq!(kugou_server::server::start(port, dir_path), Some(port));
+    assert_eq!(kugou_music_rs::server::start(port, dir_path), Some(port));
 
     let resp = tcp_request(
         port,
@@ -718,7 +718,7 @@ fn register_dev_reuses_persisted_identity_without_upstream() {
         resp2
     );
 
-    kugou_server::server::stop();
+    kugou_music_rs::server::stop();
     let _ = std::fs::remove_file(&file);
 }
 
@@ -726,7 +726,7 @@ fn register_dev_reuses_persisted_identity_without_upstream() {
 /// 截断 50 条、映射 {hash, mixsongid, fid}、过滤空 hash。
 #[test]
 fn listen_together_audios_normalize() {
-    use kugou_server::modules::listen_together::music_room_audios;
+    use kugou_music_rs::modules::listen_together::music_room_audios;
     use serde_json::{json, Value};
 
     // 正常数组：空 hash 被过滤；mixsongid 兼容 mixSongId；fid 缺省 0
@@ -764,7 +764,7 @@ fn listen_together_audios_normalize() {
 /// 一起听：auth_body 的 userid 必须是数字（rmservice 强制），token 取自 cookie。
 #[test]
 fn listen_together_auth_body() {
-    use kugou_server::modules::listen_together::{auth_body, resolve_biz};
+    use kugou_music_rs::modules::listen_together::{auth_body, resolve_biz};
     use serde_json::json;
 
     // cookie userid 为数字字符串 → 转数字
@@ -784,7 +784,7 @@ fn listen_together_auth_body() {
 /// cookie 不进 input（cookie 始终单独从 q 取，不允许 body 覆盖）。
 #[test]
 fn listen_together_merge_input() {
-    use kugou_server::modules::listen_together::merge_input;
+    use kugou_music_rs::modules::listen_together::merge_input;
     use serde_json::json;
 
     let q = json!({
@@ -805,7 +805,7 @@ fn listen_together_merge_input() {
 /// （EchoMusic 平铺发 room_id，KuGouMusicApi 发 groupid/roomid）。
 #[test]
 fn listen_together_room_id_compat() {
-    use kugou_server::modules::listen_together::{group_id, room_id};
+    use kugou_music_rs::modules::listen_together::{group_id, room_id};
     use serde_json::json;
 
     assert_eq!(room_id(&json!({ "room_id": "A" })), "A");
@@ -835,11 +835,11 @@ fn dycover_signature_matches_js() {
     });
 
     // 1) 复用标准盐签名（等价 JS signatureStandardParams）
-    let sig = kugou_server::helper::signature_android_params_standard(&params, &[], false);
+    let sig = kugou_music_rs::helper::signature_android_params_standard(&params, &[], false);
     assert_eq!(sig, "83887d10eef4a963e33cad542ca1d6cd");
 
     // 2) data 段序列化字节必须与 JS JSON.stringify 一致（键序 + 无空格）
-    let data_str = kugou_server::util::json_stringify(&params["data"]);
+    let data_str = kugou_music_rs::util::json_stringify(&params["data"]);
     assert_eq!(
         data_str,
         r#"[{"album_audio_id":468087825,"album_id":65482908}]"#
@@ -850,7 +850,7 @@ fn dycover_signature_matches_js() {
 /// 仅断言参数构造，不触发网络。
 #[test]
 fn video_barrage_list_params_both_ids() {
-    use kugou_server::modules::video_barrage::build_list_params;
+    use kugou_music_rs::modules::video_barrage::build_list_params;
     use serde_json::json;
 
     // video_id + hash 同时传入：childrenid = video_id，extdata 键必须不出现。
@@ -862,7 +862,7 @@ fn video_barrage_list_params_both_ids() {
 
 #[test]
 fn video_barrage_list_params_hash_only() {
-    use kugou_server::modules::video_barrage::build_list_params;
+    use kugou_music_rs::modules::video_barrage::build_list_params;
     use serde_json::json;
 
     // 仅传 hash：extdata = hash，childrenid 键必须不出现。
@@ -874,7 +874,7 @@ fn video_barrage_list_params_hash_only() {
 
 #[test]
 fn video_barrage_list_params_code_router_and_defaults() {
-    use kugou_server::modules::video_barrage::{build_list_params, VIDEO_BARRAGE_CODE};
+    use kugou_music_rs::modules::video_barrage::{build_list_params, VIDEO_BARRAGE_CODE};
     use serde_json::json;
 
     let q = json!({ "video_id": "VID123" });
@@ -894,8 +894,8 @@ fn video_barrage_list_params_code_router_and_defaults() {
 
 #[test]
 fn video_barrage_list_params_key_matches_sign_helper() {
-    use kugou_server::helper::sign_params_key;
-    use kugou_server::modules::video_barrage::build_list_params;
+    use kugou_music_rs::helper::sign_params_key;
+    use kugou_music_rs::modules::video_barrage::build_list_params;
     use serde_json::json;
 
     // 固定 clienttime，key 必须 = signParamsKey(clienttime)（用既有 helper 比对，不硬编码 md5）。
@@ -907,8 +907,8 @@ fn video_barrage_list_params_key_matches_sign_helper() {
 
 #[test]
 fn video_barrage_handle_requires_video_id_or_hash() {
-    use kugou_server::modules::video_barrage::handle;
-    use kugou_server::modules::Ctx;
+    use kugou_music_rs::modules::video_barrage::handle;
+    use kugou_music_rs::modules::Ctx;
     use serde_json::json;
 
     // video_id 与 hash 皆空 → 400，body 含 error_code = 400（不触网）。
@@ -927,7 +927,7 @@ fn video_barrage_handle_requires_video_id_or_hash() {
 /// 仅断言参数构造，不触发网络。
 #[test]
 fn video_barrage_send_params_shape() {
-    use kugou_server::modules::video_barrage::{
+    use kugou_music_rs::modules::video_barrage::{
         build_send_params, VIDEO_BARRAGE_CODE, VIDEO_BARRAGE_SEND_R_ADD, VIDEO_BARRAGE_SEND_VER_ADD,
     };
     use serde_json::json;
@@ -966,7 +966,7 @@ fn video_barrage_send_params_shape() {
 /// 不得出现 key / clienttime / dfid / uuid（防止后来者"顺手补齐"成 POST+签名）。
 #[test]
 fn video_barrage_send_params_no_signature_keys() {
-    use kugou_server::modules::video_barrage::build_send_params;
+    use kugou_music_rs::modules::video_barrage::build_send_params;
     use serde_json::json;
 
     let q = json!({ "video_id": "VID1", "content": "hi" });
@@ -980,7 +980,7 @@ fn video_barrage_send_params_no_signature_keys() {
 /// pid 缺省时被 compact 丢弃；传入时出现在参数里。
 #[test]
 fn video_barrage_send_params_pid_optional() {
-    use kugou_server::modules::video_barrage::build_send_params;
+    use kugou_music_rs::modules::video_barrage::build_send_params;
     use serde_json::json;
 
     let q = json!({ "video_id": "VID1", "content": "hi" });
@@ -995,8 +995,8 @@ fn video_barrage_send_params_pid_optional() {
 /// content 为空 → 400 且 body 含 error_code = 400（不触网）。
 #[test]
 fn video_barrage_send_requires_content() {
-    use kugou_server::modules::Ctx;
-    use kugou_server::modules::video_barrage::handle_send;
+    use kugou_music_rs::modules::Ctx;
+    use kugou_music_rs::modules::video_barrage::handle_send;
     use serde_json::json;
 
     let ctx = Ctx { ip: String::new(), body_bytes: None };
@@ -1013,8 +1013,8 @@ fn video_barrage_send_requires_content() {
 /// video_id 与 hash 皆空 → 400（不触网）。
 #[test]
 fn video_barrage_send_requires_video_id_or_hash() {
-    use kugou_server::modules::Ctx;
-    use kugou_server::modules::video_barrage::handle_send;
+    use kugou_music_rs::modules::Ctx;
+    use kugou_music_rs::modules::video_barrage::handle_send;
     use serde_json::json;
 
     let ctx = Ctx { ip: String::new(), body_bytes: None };
@@ -1031,7 +1031,7 @@ fn video_barrage_send_requires_video_id_or_hash() {
 /// 本项目前缀匹配会把发送请求误送进列表 handler，顺序错误即回归。
 #[test]
 fn video_barrage_send_route_order() {
-    use kugou_server::modules::{register, ModuleFn};
+    use kugou_music_rs::modules::{register, ModuleFn};
     let mut routes: Vec<(&'static str, ModuleFn)> = Vec::new();
     register(&mut routes);
     let paths: Vec<&str> = routes.iter().map(|(p, _)| *p).collect();
@@ -1050,7 +1050,7 @@ fn video_barrage_send_route_order() {
 /// 前缀匹配会把更新请求误送进查询 handler，顺序错误即回归。
 #[test]
 fn user_preference_update_route_order() {
-    use kugou_server::modules::{register, ModuleFn};
+    use kugou_music_rs::modules::{register, ModuleFn};
     let mut routes: Vec<(&'static str, ModuleFn)> = Vec::new();
     register(&mut routes);
     let paths: Vec<&str> = routes.iter().map(|(p, _)| *p).collect();
@@ -1069,7 +1069,7 @@ fn user_preference_update_route_order() {
 /// 仅断言参数构造，不触发网络。
 #[test]
 fn song_barrage_list_extdata_conditional() {
-    use kugou_server::modules::song_barrage::build_list_params;
+    use kugou_music_rs::modules::song_barrage::build_list_params;
     use serde_json::json;
 
     // special_id + hash 同时传入：childrenid = special_id，extdata 键必须不出现。
@@ -1081,7 +1081,7 @@ fn song_barrage_list_extdata_conditional() {
 
 #[test]
 fn song_barrage_list_params_hash_only() {
-    use kugou_server::modules::song_barrage::build_list_params;
+    use kugou_music_rs::modules::song_barrage::build_list_params;
     use serde_json::json;
 
     // 仅传 hash：extdata = hash，childrenid 键必须不出现。
@@ -1093,7 +1093,7 @@ fn song_barrage_list_params_hash_only() {
 
 #[test]
 fn song_barrage_list_params_code_mixsongid_and_defaults() {
-    use kugou_server::modules::song_barrage::{build_list_params, SONG_BARRAGE_CODE};
+    use kugou_music_rs::modules::song_barrage::{build_list_params, SONG_BARRAGE_CODE};
     use serde_json::json;
 
     // 与 MV 的唯一差异：mixsongid 透传；code 为歌曲弹幕池 articulossong。
@@ -1116,7 +1116,7 @@ fn song_barrage_list_params_code_mixsongid_and_defaults() {
 
 #[test]
 fn song_barrage_list_mixsongid_from_album_audio_id_alias() {
-    use kugou_server::modules::song_barrage::build_list_params;
+    use kugou_music_rs::modules::song_barrage::build_list_params;
     use serde_json::json;
 
     // mixsongid 缺省时取 album_audio_id（JS firstValue 链）。
@@ -1127,8 +1127,8 @@ fn song_barrage_list_mixsongid_from_album_audio_id_alias() {
 
 #[test]
 fn song_barrage_list_key_matches_sign_helper() {
-    use kugou_server::helper::sign_params_key;
-    use kugou_server::modules::song_barrage::build_list_params;
+    use kugou_music_rs::helper::sign_params_key;
+    use kugou_music_rs::modules::song_barrage::build_list_params;
     use serde_json::json;
 
     // 固定 clienttime，key 必须 = signParamsKey(clienttime)（用既有 helper 比对，不硬编码 md5）。
@@ -1140,8 +1140,8 @@ fn song_barrage_list_key_matches_sign_helper() {
 
 #[test]
 fn song_barrage_handle_requires_special_id_or_hash() {
-    use kugou_server::modules::song_barrage::handle;
-    use kugou_server::modules::Ctx;
+    use kugou_music_rs::modules::song_barrage::handle;
+    use kugou_music_rs::modules::Ctx;
     use serde_json::json;
 
     // special_id 与 hash 皆空 → 400，body 含 error_code = 400（不触网）。
@@ -1160,7 +1160,7 @@ fn song_barrage_handle_requires_special_id_or_hash() {
 /// code 换成歌曲弹幕池。仅断言参数构造，不触发网络。
 #[test]
 fn song_barrage_send_options_shape() {
-    use kugou_server::modules::comment_send::send_options;
+    use kugou_music_rs::modules::comment_send::send_options;
     use serde_json::json;
 
     let q = json!({
@@ -1187,8 +1187,8 @@ fn song_barrage_send_options_shape() {
 /// content 为空 → 400 且 body 含 error_code = 400（不触网）。
 #[test]
 fn song_barrage_send_requires_content() {
-    use kugou_server::modules::Ctx;
-    use kugou_server::modules::song_barrage::handle_send;
+    use kugou_music_rs::modules::Ctx;
+    use kugou_music_rs::modules::song_barrage::handle_send;
     use serde_json::json;
 
     let ctx = Ctx { ip: String::new(), body_bytes: None };
@@ -1206,7 +1206,7 @@ fn song_barrage_send_requires_content() {
 /// 本项目前缀匹配会把发送请求误送进列表 handler，顺序错误即回归。
 #[test]
 fn song_barrage_send_route_order() {
-    use kugou_server::modules::{register, ModuleFn};
+    use kugou_music_rs::modules::{register, ModuleFn};
     let mut routes: Vec<(&'static str, ModuleFn)> = Vec::new();
     register(&mut routes);
     let paths: Vec<&str> = routes.iter().map(|(p, _)| *p).collect();
@@ -1227,7 +1227,7 @@ fn song_barrage_send_route_order() {
 /// 前面，`/home/discover` 会被送进那个 handler（与 `/video/barrage` 踩过的坑同类）。
 #[test]
 fn home_discover_route_registered_and_unshadowed() {
-    use kugou_server::modules::{register, ModuleFn};
+    use kugou_music_rs::modules::{register, ModuleFn};
     let mut routes: Vec<(&'static str, ModuleFn)> = Vec::new();
     register(&mut routes);
     let paths: Vec<&str> = routes.iter().map(|(p, _)| *p).collect();
@@ -1259,7 +1259,7 @@ fn home_discover_route_registered_and_unshadowed() {
 /// 同理。任一处被改都会静默改变推荐条数/去重行为，故固化为回归测试。
 #[test]
 fn home_discover_body_defaults() {
-    use kugou_server::modules::home::{build_body, build_params};
+    use kugou_music_rs::modules::home::{build_body, build_params};
     use serde_json::json;
 
     let q = json!({});
@@ -1296,7 +1296,7 @@ fn home_discover_body_defaults() {
 /// 但它绝不能以 0 的形式混进去（那会让上游按「第 0 页」解析）。
 #[test]
 fn home_discover_body_overrides_and_page_optin() {
-    use kugou_server::modules::home::{build_body, build_params};
+    use kugou_music_rs::modules::home::{build_body, build_params};
     use serde_json::json;
 
     let q = json!({
@@ -1322,7 +1322,7 @@ fn home_discover_body_overrides_and_page_optin() {
 /// 仅断言参数构造，不触发网络。
 #[test]
 fn personal_fm_cur_mark_passthrough() {
-    use kugou_server::modules::fm::build_personal_fm_params;
+    use kugou_music_rs::modules::fm::build_personal_fm_params;
     use serde_json::json;
 
     // click_red / cancel_red 等反馈动作建议带上当前推荐标记，原样作为字符串下发。
@@ -1339,7 +1339,7 @@ fn personal_fm_cur_mark_passthrough() {
 /// action 集，Rust 侧不得白名单过滤）。
 #[test]
 fn personal_fm_mode_and_action_verbatim() {
-    use kugou_server::modules::fm::build_personal_fm_params;
+    use kugou_music_rs::modules::fm::build_personal_fm_params;
     use serde_json::json;
 
     let p = build_personal_fm_params(&json!({ "mode": "radio", "action": "click_red" }));
@@ -1366,7 +1366,7 @@ fn accompany_matching_probe() {
         .join("kugou_smoke_probe")
         .to_string_lossy()
         .into_owned();
-    assert_eq!(kugou_server::server::start(port, dir), Some(port));
+    assert_eq!(kugou_music_rs::server::start(port, dir), Some(port));
     // fileName 按 UTF-8 百分号编码（希林娜依高 - Shine Brighter (愈加璀璨)）
     let resp = tcp_request(
         port,
@@ -1374,7 +1374,7 @@ fn accompany_matching_probe() {
     );
     println!("=== /audio/accompany/matching raw response ===\n{}", resp);
     assert!(!resp.contains("Cannot GET"), "route 404: {}", resp);
-    kugou_server::server::stop();
+    kugou_music_rs::server::stop();
 }
 
 /// K 歌数量真实响应探针（#[ignore]，需外网，手动核对契约时才跑）：
@@ -1389,7 +1389,7 @@ fn audio_ktv_total_probe() {
         .join("kugou_smoke_probe")
         .to_string_lossy()
         .into_owned();
-    assert_eq!(kugou_server::server::start(port, dir), Some(port));
+    assert_eq!(kugou_music_rs::server::start(port, dir), Some(port));
     // singerName=希林娜依高（UTF-8 百分号编码）
     let resp = tcp_request(
         port,
@@ -1397,5 +1397,5 @@ fn audio_ktv_total_probe() {
     );
     println!("=== /audio/ktv/total raw response ===\n{}", resp);
     assert!(!resp.contains("Cannot GET"), "route 404: {}", resp);
-    kugou_server::server::stop();
+    kugou_music_rs::server::stop();
 }

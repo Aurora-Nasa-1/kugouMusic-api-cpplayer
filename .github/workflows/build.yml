@@ -1,25 +1,68 @@
-name: Build Module
+name: Build & Release
 
-# 三端二架构构建矩阵：
-#   android -> arm64-v8a / x86_64 / armeabi-v7a (一个 zip 装载全部 ABI)
-#   windows -> x86_64-pc-windows-msvc / aarch64-pc-windows-msvc
-#   linux   -> x86_64-unknown-linux-gnu / aarch64-unknown-linux-gnu
-# 产物均符合 CPPlayer-KMP Standard v3 JNI 规范。
+# 构建 CPPlayer 酷狗音源模块（Standard v3 JNI），并自动发版。
+#
+# 触发方式：
+#   · push tag `v*`      → 构建全部平台 + 发布 GitHub Release（附全部 zip）
+#   · push / PR / 手动   → 只构建并上传 workflow artifact，不发 Release
+#
+# 产出的每个 zip 都是可直接在 CPPlayer「音源管理 → 导入模块」里安装的模块包：
+#   kugou-music-rs-android.zip         arm64-v8a / x86_64 / armeabi-v7a
+#   kugou-music-rs-windows-x86_64.zip
+#   kugou-music-rs-windows-aarch64.zip
+#   kugou-music-rs-linux-x86_64.zip
+#   kugou-music-rs-linux-aarch64.zip
+#
+# 注意：**不要**把这些库合成一个"全平台 zip"。宿主的 manifest 只有一个
+# `entryPoint` 文件名，`.so` 与 `.dll` 没法共用一个名字；Android 多 ABI 能合成
+# 一个包，是因为它们同名同后缀。
 
 on:
   push:
-    branches:
-      - '**'
-    tags:
-      - '*'
+    branches: ['**']
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
+
+permissions:
+  contents: write
+
+# 同一个 ref 串行；tag 上的构建不允许被后来的 push 取消。
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
 jobs:
+  # 先跑静态校验与单测：清单非法 / 单测挂了就不该进入发布环节。
+  verify:
+    name: Verify (manifest + tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      # 校验 packaging/manifest.json：合法 JSON、无 BOM、必填字段齐全、
+      # version 与 Cargo.toml 一致。宿主解析失败时只会显示"模块导入失败"，
+      # 把问题挡在这里比让用户猜便宜得多。
+      - name: Validate module manifest
+        run: python scripts/package_module.py --validate-only
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: verify
+
+      - name: Cargo test
+        run: cargo test --features jni --all-targets
+
   android:
     name: Android (arm64-v8a / x86_64 / armeabi-v7a)
     runs-on: ubuntu-latest
@@ -30,8 +73,7 @@ jobs:
         with:
           python-version: '3.x'
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android,x86_64-linux-android,armv7-linux-androideabi
 
@@ -47,14 +89,14 @@ jobs:
           ndk-version: r27c
           add-to-path: false
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2
         with:
           key: android
 
       - name: Build Android ABIs
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          # Android 15+ 要求 16KB 页面对齐
           RUSTFLAGS: -Clink-arg=-Wl,-z,max-page-size=16384
         run: |
           cargo ndk -t arm64-v8a -t x86_64 -t armeabi-v7a \
@@ -65,19 +107,20 @@ jobs:
           python scripts/package_module.py --platform android \
             --lib arm64-v8a=target/jniLibs/arm64-v8a/libkugou_music_rs.so \
             --lib x86_64=target/jniLibs/x86_64/libkugou_music_rs.so \
-            --lib armeabi-v7a=target/jniLibs/armeabi-v7a/libkugou_music_rs.so
+            --lib armeabi-v7a=target/jniLibs/armeabi-v7a/libkugou_music_rs.so \
+            --out target/kugou-music-rs-android.zip
 
-      - name: Upload Android artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: kugou-music-rs-android
-          path: target/kugou-music-rs-*.zip
+          path: target/kugou-music-rs-android.zip
           if-no-files-found: error
 
   windows:
-    name: Windows (${{ matrix.target }})
+    name: Windows (${{ matrix.arch }})
     runs-on: windows-latest
     strategy:
+      fail-fast: false
       matrix:
         include:
           - target: x86_64-pc-windows-msvc
@@ -94,36 +137,34 @@ jobs:
         with:
           python-version: '3.x'
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2
         with:
           key: windows-${{ matrix.target }}
 
-      - name: Build Windows
-        run: cargo build --release --features jni --target ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --lib --features jni --target ${{ matrix.target }}
 
-      - name: Package Windows module
+      - name: Package module
         run: |
           python scripts/package_module.py --platform windows `
             --lib ${{ matrix.arch }}=target/${{ matrix.target }}/release/kugou_music_rs.dll `
             --out target/kugou-music-rs-windows-${{ matrix.arch }}.zip
 
-      - name: Upload Windows artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: kugou-music-rs-windows-${{ matrix.arch }}
-          path: target/kugou-music-rs-windows-*.zip
+          path: target/kugou-music-rs-windows-${{ matrix.arch }}.zip
           if-no-files-found: error
 
   linux:
-    name: Linux (${{ matrix.target }})
+    name: Linux (${{ matrix.arch }})
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
@@ -144,42 +185,60 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+      - name: Install cross
+        if: matrix.use_cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - uses: Swatinem/rust-cache@v2
         with:
           key: linux-${{ matrix.target }}
 
-      - name: Build Linux (Native)
+      - name: Build (native)
         if: ${{ !matrix.use_cross }}
-        run: cargo build --release --features jni --target ${{ matrix.target }}
+        run: cargo build --release --lib --features jni --target ${{ matrix.target }}
 
-      - name: Build Linux (Cross)
+      - name: Build (cross)
         if: ${{ matrix.use_cross }}
-        uses: houseabsolute/actions-rust-cross@v1
-        with:
-          target: ${{ matrix.target }}
-          args: --release --features jni
+        run: cross build --release --lib --features jni --target ${{ matrix.target }}
 
-      - name: Package Linux module
+      - name: Package module
         run: |
           python scripts/package_module.py --platform linux \
             --lib ${{ matrix.arch }}=target/${{ matrix.target }}/release/libkugou_music_rs.so \
             --out target/kugou-music-rs-linux-${{ matrix.arch }}.zip
 
-      - name: Upload Linux artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: kugou-music-rs-linux-${{ matrix.arch }}
-          path: target/kugou-music-rs-linux-*.zip
+          path: target/kugou-music-rs-linux-${{ matrix.arch }}.zip
           if-no-files-found: error
+
+  # JNI 冒烟测试：用与宿主完全一致的包名/类名/方法签名加载 .so，跑真实接口。
+  # 会访问酷狗上游，CI 网络/地域可能不通，所以**不阻塞发布**（仅作信息参考）。
+  smoke:
+    name: JNI Smoke (linux x86_64, informational)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: smoke
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - run: cargo build --release --lib --features jni
+      - run: bash tools/jni-smoke/run.sh target/release/libkugou_music_rs.so
 
   release:
     name: Release
-    if: startsWith(github.ref, 'refs/tags/')
-    needs: [android, windows, linux]
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [verify, android, windows, linux]
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -187,8 +246,20 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: List release assets
+        run: ls -l dist
+
+      - name: Generate SHA256SUMS
+        run: |
+          cd dist
+          sha256sum *.zip > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.zip
+          files: |
+            dist/*.zip
+            dist/SHA256SUMS.txt
           generate_release_notes: true
+          fail_on_unmatched_files: true

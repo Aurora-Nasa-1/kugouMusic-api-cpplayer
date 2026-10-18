@@ -1,0 +1,28 @@
+# 统一行尾：仓库内存 LF。
+# Windows 上 core.autocrlf=true 会把工作区转成 CRLF，但那会让 CI 上的
+# tools/jni-smoke/run.sh 报 `$'\r': command not found`，以及 manifest 校验
+# 出现难查的差异 —— 所以这里显式钉死。
+* text=auto eol=lf
+
+*.sh    text eol=lf
+*.py    text eol=lf
+*.rs    text eol=lf
+*.java  text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.json  text eol=lf
+Makefile text eol=lf
+
+# PowerShell 脚本：CRLF + （工作区里已有的）UTF-8 BOM 才能让
+# Windows PowerShell 5.1 正确读取中文。
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制，别猜
+*.dll  binary
+*.so   binary
+*.dylib binary
+*.zip  binary
+*.png  binary
+*.jpg  binary

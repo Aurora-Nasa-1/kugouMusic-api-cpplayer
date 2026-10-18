@@ -78,6 +78,7 @@ pub fn transform_kugou_song(item: &Value) -> Option<Value> {
     // 2. 提取歌名
     let raw_name = item
         .get("SongName")
+        .or_else(|| item.get("audio_name"))
         .or_else(|| item.get("songname"))
         .or_else(|| item.get("FileName"))
         .or_else(|| item.get("filename"))
@@ -276,6 +277,8 @@ fn handle_search(params: &Value, ctx: &Ctx) -> Value {
 }
 
 fn handle_song_url(params: &Value, ctx: &Ctx) -> Value {
+    // /v5/url 必须带真实 dfid，否则上游一律 502。宿主不会替我们注册设备。
+    crate::device::ensure_registered();
     let id = params
         .get("id")
         .or_else(|| params.get("hash"))
@@ -313,38 +316,37 @@ fn handle_song_url(params: &Value, ctx: &Ctx) -> Value {
     match crate::modules::song_url::handle(&q, ctx) {
         Ok(resp) => {
             let body = resp.body.to_json();
-            let mut play_url: Option<String> = None;
-            let mut format = "mp3".to_string();
+            // /v5/url 的响应有两种形状：
+            //   · 未登录/普通音质：字段**平铺在根层**（url、extName、backupUrl…）
+            //   · 某些 CDN 网关：包一层 `data`（对象或数组）
+            // 原实现只认 body.data，于是根层响应永远被当成"没有链接"，
+            // 宿主侧表现就是"搜索正常、播放没声"。
+            let info = pick_play_info(&body);
+            let play_url = info.and_then(|v| extract_url_field(v));
+            let format = info
+                .and_then(|v| {
+                    v.get("extName")
+                        .or_else(|| v.get("format"))
+                        .and_then(|x| x.as_str())
+                        .filter(|s| !s.is_empty())
+                })
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| if quality == "flac" { "flac".to_string() } else { "mp3".to_string() });
 
-            if let Some(data) = body.get("data") {
-                if let Some(url_str) = data.get("url").and_then(|v| v.as_str()) {
-                    if !url_str.is_empty() {
-                        play_url = Some(url_str.to_string());
-                    }
-                } else if let Some(url_arr) = data.get("url").and_then(|v| v.as_array()) {
-                    for u in url_arr {
-                        if let Some(s) = u.as_str() {
-                            if !s.is_empty() {
-                                play_url = Some(s.to_string());
-                                break;
-                            }
-                        }
-                    }
-                }
+            // 无直链时把上游的拦截原因带回去（付费/需要登录），
+            // 便于宿主给出"为什么放不了"而不是空白。
+            let reason = info
+                .and_then(|v| v.get("fail_process").and_then(|f| f.as_array()))
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|x| x.as_str())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
+                .filter(|s| !s.is_empty());
 
-                if let Some(ext) = data
-                    .get("extName")
-                    .or_else(|| data.get("format"))
-                    .and_then(|v| v.as_str())
-                {
-                    format = ext.to_string();
-                } else if quality == "flac" {
-                    format = "flac".to_string();
-                }
-            }
-
-            if let Some(url) = play_url {
-                json!({
+            match play_url {
+                Some(url) => json!({
                     "code": 0,
                     "data": {
                         "url": url,
@@ -354,15 +356,19 @@ fn handle_song_url(params: &Value, ctx: &Ctx) -> Value {
                             "User-Agent": crate::request::DEFAULT_UA
                         }
                     }
-                })
-            } else {
-                json!({
+                }),
+                None => json!({
                     "code": 0,
+                    "msg": match &reason {
+                        Some(r) => format!("no playable url (upstream fail_process: {r})"),
+                        None => "no playable url".to_string(),
+                    },
                     "data": {
                         "url": null,
-                        "quality": level
+                        "quality": level,
+                        "reason": reason,
                     }
-                })
+                }),
             }
         }
         Err(err) => json!({
@@ -373,7 +379,57 @@ fn handle_song_url(params: &Value, ctx: &Ctx) -> Value {
     }
 }
 
+/// 在 /v5/url 的响应里找出真正承载播放信息的对象。
+///
+/// 依次尝试：根层 → `data`（对象）→ `data[0]`；判据是"含 url / backupUrl 之类的键"，
+/// 而不是"键存在就当数"——避免把 `{"data": null}` 之流误判成有链接。
+fn pick_play_info(body: &Value) -> Option<&Value> {
+    fn looks_like_info(v: &Value) -> bool {
+        v.is_object()
+            && (v.get("url").is_some()
+                || v.get("backupUrl").is_some()
+                || v.get("backup_url").is_some()
+                || v.get("extName").is_some())
+    }
+
+    if looks_like_info(body) {
+        return Some(body);
+    }
+    if let Some(data) = body.get("data") {
+        if looks_like_info(data) {
+            return Some(data);
+        }
+        if let Some(first) = data.as_array().and_then(|a| a.first()) {
+            if looks_like_info(first) {
+                return Some(first);
+            }
+        }
+    }
+    None
+}
+
+/// `url` / `backupUrl` 既可能是字符串，也可能是字符串数组。
+fn extract_url_field(info: &Value) -> Option<String> {
+    for key in ["url", "backupUrl", "backup_url"] {
+        match info.get(key) {
+            Some(Value::String(s)) if !s.is_empty() => return Some(s.clone()),
+            Some(Value::Array(arr)) => {
+                for item in arr {
+                    if let Some(s) = item.as_str() {
+                        if !s.is_empty() {
+                            return Some(s.to_string());
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn handle_lyric(params: &Value, ctx: &Ctx) -> Value {
+    crate::device::ensure_registered();
     let id = params
         .get("id")
         .or_else(|| params.get("hash"))
@@ -440,18 +496,22 @@ fn handle_lyric(params: &Value, ctx: &Ctx) -> Value {
 }
 
 fn handle_song_detail(params: &Value, ctx: &Ctx) -> Value {
+    crate::device::ensure_registered();
     let ids = params
         .get("ids")
         .or_else(|| params.get("id"))
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    let mut q = json!({
+    // /v1/audio/audio 从 cookie 里取 dfid / KUGOU_API_MID 参与签名；JNI 宿主
+    // 不注入 cookie，必须补上设备身份，否则上游恒定 `20006 sign error`。
+    let mut cookie = params.get("cookie").cloned().unwrap_or_else(|| json!({}));
+    crate::device::merge_device_identity(&mut cookie);
+
+    let q = json!({
         "hash": ids,
+        "cookie": cookie,
     });
-    if let Some(cookie) = params.get("cookie") {
-        q["cookie"] = cookie.clone();
-    }
 
     match crate::modules::audio::handle(&q, ctx) {
         Ok(resp) => {

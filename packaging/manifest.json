@@ -5,6 +5,12 @@
   "type": "jni",
   "entryPoint": "libkugou_music_rs.so",
   "contract": "standard",
+  "minHostApiVersion": 1,
+  "supportedAbis": [
+    "arm64-v8a",
+    "x86_64",
+    "armeabi-v7a"
+  ],
   "capabilities": [
     "search",
     "playback",
