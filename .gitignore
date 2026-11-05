@@ -7,3 +7,5 @@
 .idea/
 .vscode/
 *.iml
+# 本地助手工作区（含机器路径与排障笔记），不入库
+.workbuddy/
