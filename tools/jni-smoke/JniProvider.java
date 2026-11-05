@@ -100,9 +100,36 @@ public class JniProvider {
 
         String toplist = p.nativeCallApi("toplist", "{}");
         check("toplist", toplist != null && toplist.contains("\"list\""), "len=" + len(toplist));
+        String rankingId = firstNumericId(toplist);
+        check("ranking has a host-compatible numeric id", !rankingId.isEmpty(), "");
+        if (!rankingId.isEmpty()) {
+            String rankingDetail = p.nativeCallApi("playlist/detail",
+                "{\"id\":\"" + rankingId + "\",\"limit\":\"3\"}");
+            check("open ranking through playlist/detail", rankingDetail != null
+                && rankingDetail.contains("\"code\":0") && rankingDetail.contains("\"rankId\":")
+                && extractIds(rankingDetail).size() == 3, "len=" + len(rankingDetail));
+            String rankingTracks = p.nativeCallApi("playlist/track/all",
+                "{\"id\":\"" + rankingId + "\",\"limit\":\"3\",\"offset\":\"2\"}");
+            check("ranking tracks with non-aligned offset", rankingTracks != null
+                && rankingTracks.contains("\"code\":0") && rankingTracks.contains("\"rankId\":")
+                && extractIds(rankingTracks).size() == 3, "len=" + len(rankingTracks));
+        }
 
         String hot = p.nativeCallApi("search/hot/detail", "{}");
         check("search/hot/detail", hot != null && hot.contains("searchWord"), "len=" + len(hot));
+
+        String[][] homeMethods = {
+            {"personalized", "result"}, {"recommend/resource", "recommend"},
+            {"top_playlist", "playlists"}, {"top_playlist_highquality", "playlists"},
+            {"top_album", "albums"}, {"top_artists", "artists"},
+            {"top_song", "data"}, {"personalized_newsong", "result"},
+            {"personal_fm", "data"}, {"banner", "banners"}
+        };
+        for (String[] method : homeMethods) {
+            String response = p.nativeCallApi(method[0], "{\"limit\":\"3\"}");
+            check("homepage " + method[0], response != null && response.contains("\"code\":0")
+                && response.contains("\"" + method[1] + "\":[{"), "len=" + len(response));
+        }
 
         String suggest = p.nativeCallApi("search/suggest", "{\"keywords\":\"周杰\"}");
         check("search/suggest", suggest != null && suggest.length() > 20, "len=" + len(suggest));
@@ -160,6 +187,16 @@ public class JniProvider {
         if (s == null) return "null";
         String t = s.replace("\n", " ");
         return t.length() > 120 ? t.substring(0, 120) + "..." : t;
+    }
+
+    private static String firstNumericId(String json) {
+        if (json == null) return "";
+        int at = json.indexOf("\"id\":");
+        if (at < 0) return "";
+        int start = at + 5;
+        int end = start;
+        while (end < json.length() && Character.isDigit(json.charAt(end))) end++;
+        return json.substring(start, end);
     }
 
     /** 从搜索响应里粗暴抠出 id（避免为了冒烟测试引入 JSON 依赖）。 */

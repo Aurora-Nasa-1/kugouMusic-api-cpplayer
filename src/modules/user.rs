@@ -1292,21 +1292,56 @@ pub fn handle_listen(q: &Value, ctx: &Ctx) -> Result<ModuleResponse, ModuleRespo
 
 /// user_playlist.js → /user/playlist（获取用户歌单）。
 pub fn handle_playlist(q: &Value, ctx: &Ctx) -> Result<ModuleResponse, ModuleResponse> {
+    ctx.send(&playlist_request(q))
+}
+
+fn playlist_request(q: &Value) -> RequestOptions {
     let userid = cookie_or_param_str(q, "userid", "0");
     let token = cookie_or_param_str(q, "token", "");
+    // Numeric zero is a real list kind (created), not a missing/default value.
+    let kind = q.get("type").and_then(|value| {
+        value.as_i64().or_else(|| value.as_str().and_then(|value| value.parse::<i64>().ok()))
+    }).unwrap_or(2);
     let dm = json!({
         "userid": userid,
         "token": token,
         "total_ver": 979,
-        "type": q_num(q, "type", 2),
+        "type": kind,
         "page": q_num(q, "page", 1),
         "pagesize": q_num(q, "pagesize", 30),
     });
-    forward(
-        q, ctx, "post", "/v7/get_all_list", None,
-        Some(json!({ "plat": 1, "userid": userid.trim().parse::<i64>().unwrap_or(0), "token": token })),
-        Some(dm), "android", &[("x-router", "cloudlist.service.kugou.com")], false, false,
-    )
+    RequestOptions::new("/v7/get_all_list")
+        .post("/v7/get_all_list")
+        .params(json!({ "plat": 1, "userid": userid.trim().parse::<i64>().unwrap_or(0), "token": token }))
+        .json_body(dm)
+        .encrypt_type("android")
+        .cookie(q_cookie(q))
+        .header("x-router", "cloudlist.service.kugou.com")
+}
+
+#[cfg(test)]
+mod playlist_request_tests {
+    use super::*;
+    use crate::request::BodyData;
+
+    #[test]
+    fn account_list_kinds_preserve_numeric_zero_and_string_values() {
+        for (kind, expected) in [(json!(0), 0), (json!("0"), 0), (json!(1), 1), (json!("1"), 1), (Value::Null, 2)] {
+            let options = playlist_request(&json!({
+                "type": kind, "page": 2, "pagesize": 100,
+                "cookie": {"userid": "123", "token": "fixture=="}
+            }));
+            assert_eq!(options.method, "POST");
+            assert_eq!(options.url, "/v7/get_all_list");
+            assert_eq!(options.headers["x-router"], "cloudlist.service.kugou.com");
+            let BodyData::Json(body) = options.data else { panic!("expected JSON") };
+            assert_eq!(body["type"], expected);
+            assert_eq!(body["page"], 2);
+            assert_eq!(body["pagesize"], 100);
+            assert_eq!(body["userid"], "123");
+            assert_eq!(body["token"], "fixture==");
+        }
+    }
 }
 
 /// user_video_collect.js → /user/video/collect（收藏的视频）。

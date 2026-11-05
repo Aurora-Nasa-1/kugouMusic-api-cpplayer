@@ -8,7 +8,7 @@ pub fn handle(q: &Value, ctx: &Ctx) -> Result<ModuleResponse, ModuleResponse> {
     let data_map = json!({
         "is_publish": 1,
         "ip_id": q.get("id").cloned().unwrap_or(Value::Null),
-        "sort": 3,
+        "sort": q_num(q, "sort", 3),
         "page": q_num(q, "page", 1),
         "pagesize": q_num(q, "pagesize", 30),
         "query": 1,

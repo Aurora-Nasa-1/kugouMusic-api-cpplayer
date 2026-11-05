@@ -5,18 +5,27 @@ use crate::cache::now_epoch_secs;
 use crate::crypto::{crypto_aes_encrypt, rsa_encrypt2};
 use crate::helper::sign_params_key;
 use crate::modules::{forward, q_cookie, q_num, q_str, c_str, param_or_cookie_num, Ctx};
-use crate::request::ModuleResponse;
+use crate::request::{ModuleResponse, RequestOptions};
 use crate::util::json_stringify;
 use serde_json::{json, Map, Value};
 
 /// artist_detail.js → /artist/detail（歌手详情）。
 pub fn handle_detail(q: &Value, ctx: &Ctx) -> Result<ModuleResponse, ModuleResponse> {
-    forward(
-        q, ctx, "POST", "/kmr/v3/author", None,
-        None, Some(json!({ "author_id": q.get("id").cloned().unwrap_or(Value::Null) })), "android",
-        &[("x-router", "openapi.kugou.com"), ("kg-tid", "36")],
-        false, false,
-    )
+    handle_detail_with_timeout(q, ctx, 20)
+}
+
+pub(crate) fn handle_detail_with_timeout(
+    q: &Value, ctx: &Ctx, timeout_secs: u64,
+) -> Result<ModuleResponse, ModuleResponse> {
+    let options = RequestOptions::new("/kmr/v3/author")
+        .post("/kmr/v3/author")
+        .json_body(json!({ "author_id": q.get("id").cloned().unwrap_or(Value::Null) }))
+        .encrypt_type("android")
+        .cookie(q_cookie(q))
+        .header("x-router", "openapi.kugou.com")
+        .header("kg-tid", "36")
+        .timeout_secs(timeout_secs);
+    ctx.send(&options)
 }
 
 /// artist_albums.js → /artist/albums（歌手专辑）。

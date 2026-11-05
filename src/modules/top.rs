@@ -3,7 +3,7 @@
 
 use crate::cache::now_epoch_secs;
 use crate::helper::sign_params_key;
-use crate::modules::{c_str, forward, q_num, q_str, Ctx};
+use crate::modules::{c_str, cookie_or_param_num, forward, q_num, q_str, Ctx};
 use crate::request::{BodyValue, ModuleResponse};
 use serde_json::{json, Map, Value};
 
@@ -142,7 +142,7 @@ pub fn handle_ip(q: &Value, ctx: &Ctx) -> Result<ModuleResponse, ModuleResponse>
 pub fn handle_playlist(q: &Value, ctx: &Ctx) -> Result<ModuleResponse, ModuleResponse> {
     let date_time = now_epoch_secs() as i64;
     let mid = c_str(q, "KUGOU_API_MID");
-    let userid: i64 = q_num(q, "userid", 0);
+    let userid = cookie_or_param_num(q, "userid", 0);
 
     let mut data_map = Map::new();
     data_map.insert("appid".to_string(), json!(3116));
@@ -162,7 +162,7 @@ pub fn handle_playlist(q: &Value, ctx: &Ctx) -> Result<ModuleResponse, ModuleRes
         "withsong": q_num(q, "withsong", 1),
         "sort": q_num(q, "sort", 1),
         "ugc": 1,
-        "is_selected": 0,
+        "is_selected": q_num(q, "is_selected", 0),
         "withrecommend": 1,
         "area_code": 1,
         "categoryid": q_num(q, "category_id", 0),

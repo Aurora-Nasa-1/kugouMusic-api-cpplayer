@@ -1,6 +1,6 @@
 [package]
 name = "kugou-music-rs"
-version = "0.1.0"
+version = "0.1.3"
 edition = "2021"
 description = "Kugou Music Provider for CPPlayer-KMP (Standard v3 API)"
 license = "MIT"

@@ -364,7 +364,7 @@ struct Req {
 fn handle_request(mut request: Request, _data_dir: &str) -> Result<(), String> {
     let method = request.method().clone();
     let url = request.url().to_string();
-    let (path, _query_part) = match url.find('?') {
+    let (path, query_part) = match url.find('?') {
         Some(i) => (url[..i].to_string(), url[i + 1..].to_string()),
         None => (url.clone(), String::new()),
     };
@@ -485,15 +485,12 @@ fn handle_request(mut request: Request, _data_dir: &str) -> Result<(), String> {
         match parse_json_body(&body_bytes) {
             Ok(v) => Some(v),
             Err(e) => {
-                let mut resp = Response::from_data(e.into_bytes()).with_status_code(400);
-                resp = resp.with_header(
-                    make_header("Content-Type", "text/plain; charset=utf-8").unwrap(),
+                return respond_json(
+                    request,
+                    400,
+                    &json!({"code": 400, "msg": format!("Invalid JSON body: {e}")}),
+                    &cors_headers,
                 );
-                for (k, v) in &cors_headers {
-                    resp = resp.with_header(make_header(k, v)?);
-                }
-                request.respond(resp).map_err(|e| e.to_string())?;
-                return Ok(());
             }
         }
     } else if ct.contains("application/x-www-form-urlencoded") {
@@ -502,6 +499,28 @@ fn handle_request(mut request: Request, _data_dir: &str) -> Result<(), String> {
         None
     };
     let body_is_buffer = ct.contains("application/octet-stream");
+
+    // Desktop workers and the host's HTTP fallback use /api/<method> with the
+    // same flat parameters and Standard response contract as nativeCallApi.
+    if let Some(api_method) = path.strip_prefix("/api/") {
+        let mut params = parse_query(&query_part);
+        if let Some(body) = &body_value {
+            let Some(body_params) = body.as_object() else {
+                return respond_json(
+                    request,
+                    400,
+                    &json!({"code": 400, "msg": "API parameters must be a JSON object"}),
+                    &cors_headers,
+                );
+            };
+            params.as_object_mut().unwrap().extend(body_params.clone());
+        }
+
+        // Do not use the legacy URL-only cache: API responses may be specific
+        // to the POST body or the caller's login session.
+        let result = guard_standard_api_call(|| crate::standard_api::handle_api(api_method, &params));
+        return respond_json(request, 200, &result, &cors_headers);
+    }
 
     // ---- apicache: check hit before dispatching ----
     let hostname = headers
@@ -617,15 +636,39 @@ fn handle_request(mut request: Request, _data_dir: &str) -> Result<(), String> {
         }
     }
 
-    // 404 fallback (Express default "Cannot GET /path")
-    let body = format!("Cannot {} {}", method_name(&method), path);
-    let mut resp = Response::from_data(body.into_bytes()).with_status_code(404);
-    resp = resp.with_header(make_header("Content-Type", "text/html; charset=utf-8")?);
-    for (k, v) in &cors_headers {
-        resp = resp.with_header(make_header(k, v)?);
+    respond_json(
+        request,
+        404,
+        &json!({
+            "code": 404,
+            "msg": format!("Cannot {} {}", method_name(&method), path),
+            "method": method_name(&method),
+            "path": path
+        }),
+        &cors_headers,
+    )
+}
+
+fn guard_standard_api_call(call: impl FnOnce() -> Value + std::panic::UnwindSafe) -> Value {
+    std::panic::catch_unwind(call)
+        .unwrap_or_else(|_| json!({"code": 500, "msg": "Provider API panicked"}))
+}
+
+fn respond_json(
+    request: Request,
+    status: u16,
+    body: &Value,
+    cors_headers: &[(String, String)],
+) -> Result<(), String> {
+    let mut response =
+        Response::from_data(json_stringify(body).into_bytes()).with_status_code(status);
+    for (key, value) in cors_headers {
+        response = response.with_header(make_header(key, value)?);
     }
-    request.respond(resp).map_err(|e| e.to_string())?;
-    Ok(())
+    response = response
+        .with_header(make_header("Content-Type", "application/json; charset=utf-8")?)
+        .with_header(make_header("Cache-Control", "no-store")?);
+    request.respond(response).map_err(|error| error.to_string())
 }
 
 fn respond_module(
@@ -995,6 +1038,179 @@ fn build_query(
     }
 
     Value::Object(query)
+}
+
+#[cfg(test)]
+mod http_contract_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+
+    fn request(method: &str, path: &str, body: &str) -> (u16, String, Value) {
+        let server = Server::http(("127.0.0.1", 0)).unwrap();
+        let address = server.server_addr().to_ip().unwrap();
+        let handler = std::thread::spawn(move || {
+            let request = server
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .expect("local request should reach the server");
+            handle_request(request, "").unwrap();
+        });
+
+        // Use a direct socket so environment proxies cannot intercept the fixture.
+        let mut stream = TcpStream::connect(address).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        write!(
+            stream,
+            "{method} {path} HTTP/1.1\r\nHost: {address}\r\n\
+             Origin: http://localhost\r\n\
+             Content-Type: application/json\r\nContent-Length: {}\r\n\
+             Connection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        handler.join().unwrap();
+
+        let (headers, body) = response.split_once("\r\n\r\n").unwrap();
+        let status = headers.split_whitespace().nth(1).unwrap().parse().unwrap();
+        let json = serde_json::from_str(body)
+            .unwrap_or_else(|error| panic!("response must be JSON: {error}; body={body:?}"));
+        assert!(
+            headers
+                .to_ascii_lowercase()
+                .contains("content-type: application/json"),
+            "JSON responses must declare their content type: {headers}"
+        );
+        (status, headers.to_string(), json)
+    }
+
+    #[test]
+    fn post_api_uses_standard_dispatch_and_top_level_body_params() {
+        let params = json!({"key": "local-fixture"});
+        let expected = crate::standard_api::handle_api("login/qr/create", &params);
+        let (status, headers, body) = request("POST", "/api/login/qr/create", &params.to_string());
+
+        assert_eq!(status, 200);
+        assert_eq!(body, expected);
+        assert!(body["data"]["url"].as_str().unwrap().ends_with("local-fixture"));
+        let headers = headers.to_ascii_lowercase();
+        assert!(headers.contains("cache-control: no-store"));
+        assert!(headers.contains("access-control-allow-origin: http://localhost"));
+    }
+
+    #[test]
+    fn get_api_preserves_query_parameters_and_standard_response() {
+        let params = json!({"key": "local-fixture=="});
+        let expected = crate::standard_api::handle_api("login/qr/create", &params);
+        let (status, _, body) = request(
+            "GET",
+            "/api/login/qr/create?key=local-fixture%3D%3D",
+            "",
+        );
+
+        assert_eq!(status, 200);
+        assert_eq!(body, expected);
+    }
+
+    #[test]
+    fn post_api_body_overrides_query_parameters() {
+        let (status, _, body) = request(
+            "POST",
+            "/api/login/qr/create?key=query-fixture",
+            r#"{"key":"body-fixture"}"#,
+        );
+
+        assert_eq!(status, 200);
+        assert!(body["data"]["url"].as_str().unwrap().ends_with("body-fixture"));
+    }
+
+    #[test]
+    fn unknown_api_method_returns_standard_json_error() {
+        let expected = crate::standard_api::handle_api("missing/contract/test", &json!({}));
+        let (status, _, body) = request("POST", "/api/missing/contract/test", "{}");
+
+        assert_eq!(status, 200);
+        assert_eq!(body, expected);
+        assert_eq!(body["code"], -1);
+    }
+
+    #[test]
+    fn unknown_legacy_route_returns_json_404_instead_of_cannot_post_text() {
+        let (status, _, body) = request("POST", "/missing/contract/test", "{}");
+
+        assert_eq!(status, 404);
+        assert_eq!(body["code"], 404);
+        assert_eq!(body["method"], "POST");
+        assert_eq!(body["path"], "/missing/contract/test");
+    }
+
+    #[test]
+    fn invalid_json_body_returns_json_400() {
+        for path in ["/api/login/status", "/missing/contract/test"] {
+            let (status, _, body) = request("POST", path, "{");
+            assert_eq!(status, 400);
+            assert_eq!(body["code"], 400);
+            assert!(body["msg"].as_str().unwrap().contains("Invalid JSON"));
+        }
+    }
+
+    #[test]
+    fn standard_api_rejects_non_object_parameters_as_json_error() {
+        for params in ["[]", "null", "1", r#""text""#] {
+            let (status, _, body) = request("POST", "/api/login/status", params);
+            assert_eq!(status, 400);
+            assert_eq!(body["code"], 400);
+        }
+    }
+
+    #[test]
+    fn standard_song_url_validation_matches_native_contract() {
+        let expected = crate::standard_api::handle_api("song/url/v1", &json!({}));
+        let (status, _, body) = request("POST", "/api/song/url/v1", "{}");
+
+        assert_eq!(status, 200);
+        assert_eq!(body, expected);
+        assert_eq!(body["code"], 500);
+        assert!(body["data"]["url"].is_null());
+    }
+
+    #[test]
+    fn account_library_routes_use_standard_dispatch_without_caching_or_anonymous_writes() {
+        for (method, params) in [
+            ("like", json!({"id": "aabbccddeeff00112233445566778899", "like": "false"})),
+            ("likelist", json!({})),
+            ("playlist/tracks", json!({"op": "add", "pid": "198", "tracks": "aabbccddeeff00112233445566778899"})),
+            ("playlist/delete", json!({"id": "198"})),
+            ("playlist/subscribe", json!({"id": "7235936", "t": "1"})),
+        ] {
+            let (status, headers, body) = request("POST", &format!("/api/{method}"), &params.to_string());
+            assert_eq!(status, 200);
+            assert_eq!(body["code"], 401, "{method}");
+            assert!(headers.to_ascii_lowercase().contains("cache-control: no-store"));
+        }
+        let (status, _, body) = request("GET", "/api/like?id=invalid&like=false", "");
+        assert_eq!(status, 200);
+        assert_eq!(body["code"], 400);
+    }
+
+    #[test]
+    fn standard_api_panics_return_json_error() {
+        let body = guard_standard_api_call(|| panic!("fixture provider failure"));
+        assert_eq!(body["code"], 500);
+        assert_eq!(body["msg"], "Provider API panicked");
+    }
+
+    #[test]
+    fn legacy_routes_keep_their_original_dispatch_and_validation() {
+        let (status, _, body) = request("POST", "/comment/music/send", "{}");
+
+        assert_eq!(status, 400);
+        assert!(body["msg"].as_str().unwrap().contains("content"));
+    }
 }
 
 #[cfg(test)]

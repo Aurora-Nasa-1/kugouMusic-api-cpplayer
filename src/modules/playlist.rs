@@ -7,7 +7,7 @@ use crate::config::{APP_ID, CLIENT_VER};
 use crate::crypto::{playlist_aes_decrypt, playlist_aes_encrypt, rsa_encrypt2};
 use crate::helper::sign_params_key;
 use crate::modules::{
-    cookie_or_param_str, forward, param_or_cookie_str, q_cookie, q_num, q_str, Ctx,
+    forward, param_or_cookie_str, q_cookie, q_num, q_str, Ctx,
 };
 use crate::request::{BodyValue, ModuleResponse, RequestOptions};
 use crate::util::json_stringify;
@@ -134,7 +134,6 @@ pub fn handle_add(q: &Value, ctx: &Ctx) -> Result<ModuleResponse, ModuleResponse
     let userid_str = param_or_cookie_str(q, "userid", "0");
     let userid: i64 = userid_str.trim().parse().unwrap_or(0);
     let token = param_or_cookie_str(q, "token", "");
-    log::info!("[playlist/add] userid={}, token={}...", userid, if token.len() > 8 { &token[..8] } else { &token });
     let clienttime = now_secs();
     let ptype = q_num(q, "type", 0);
 
@@ -185,7 +184,6 @@ pub fn handle_del(q: &Value, ctx: &Ctx) -> Result<ModuleResponse, ModuleResponse
     let userid_str = param_or_cookie_str(q, "userid", "0");
     let userid: i64 = userid_str.trim().parse().unwrap_or(0);
     let token = param_or_cookie_str(q, "token", "");
-    log::info!("[playlist/del] userid={}, token={}..., listid={}", userid, if token.len() > 8 { &token[..8] } else { &token }, q_num(q, "listid", 0));
     let dm = json!({
         "listid": q_num(q, "listid", 0),
         "total_ver": 0,
@@ -283,6 +281,10 @@ pub fn handle_tags(q: &Value, ctx: &Ctx) -> Result<ModuleResponse, ModuleRespons
 
 /// playlist_track_all.js → /playlist/track/all（获取歌单所有歌曲）。
 pub fn handle_track_all(q: &Value, ctx: &Ctx) -> Result<ModuleResponse, ModuleResponse> {
+    ctx.send(&track_all_request(q))
+}
+
+fn track_all_request(q: &Value) -> RequestOptions {
     let pagesize = q_num(q, "pagesize", 30);
     let gcid = {
         let v = q_str(q, "global_collection_id", "");
@@ -296,7 +298,10 @@ pub fn handle_track_all(q: &Value, ctx: &Ctx) -> Result<ModuleResponse, ModuleRe
     pm.insert("area_code".to_string(), json!(1));
     pm.insert(
         "begin_idx".to_string(),
-        json!((q_num(q, "page", 1) - 1) * pagesize),
+        json!(q.get("offset")
+            .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+            .unwrap_or((q_num(q, "page", 1) - 1) * pagesize)
+            .max(0)),
     );
     pm.insert("plat".to_string(), json!(1));
     pm.insert("type".to_string(), json!(1));
@@ -308,16 +313,20 @@ pub fn handle_track_all(q: &Value, ctx: &Ctx) -> Result<ModuleResponse, ModuleRe
     );
     pm.insert("pagesize".to_string(), json!(pagesize));
     pm.insert("global_collection_id".to_string(), json!(gcid));
-    forward(
-        q, ctx, "GET", "/pubsongs/v2/get_other_list_file_nofilt", None,
-        Some(Value::Object(pm)), None, "android", &[], false, false,
-    )
+    RequestOptions::new("/pubsongs/v2/get_other_list_file_nofilt")
+        .params(Value::Object(pm))
+        .encrypt_type("android")
+        .cookie(q_cookie(q))
 }
 
 /// playlist_track_all_new.js → /playlist/track/all/new（获取自己歌单所有歌曲）。
 pub fn handle_track_all_new(q: &Value, ctx: &Ctx) -> Result<ModuleResponse, ModuleResponse> {
-    let userid = cookie_or_param_str(q, "userid", "0");
-    let token = cookie_or_param_str(q, "token", "0");
+    ctx.send(&track_all_new_request(q))
+}
+
+fn track_all_new_request(q: &Value) -> RequestOptions {
+    let userid = param_or_cookie_str(q, "userid", "0");
+    let token = param_or_cookie_str(q, "token", "0");
     let mut dm: Map<String, Value> = Map::new();
     if let Some(v) = q.get("listid") {
         if !v.is_null() {
@@ -330,39 +339,49 @@ pub fn handle_track_all_new(q: &Value, ctx: &Ctx) -> Result<ModuleResponse, Modu
     dm.insert("pagesize".to_string(), json!(q_num(q, "pagesize", 30)));
     dm.insert("allplatform".to_string(), json!(1));
     dm.insert("show_cover".to_string(), json!(1));
-    dm.insert("type".to_string(), json!(0));
+    dm.insert("type".to_string(), json!(q_num(q, "type", 0)));
     dm.insert("token".to_string(), json!(token));
     dm.insert("page".to_string(), json!(q_num(q, "page", 1)));
-    forward(
-        q, ctx, "post", "/v4/get_list_all_file", None, None,
-        Some(Value::Object(dm)), "android", &[("x-router", "cloudlist.service.kugou.com")], false, false,
-    )
+    RequestOptions::new("/v4/get_list_all_file_v3")
+        .post("/v4/get_list_all_file_v3")
+        .json_body(Value::Object(dm))
+        .encrypt_type("android")
+        .cookie(q_cookie(q))
+        .header("x-router", "cloudlist.service.kugou.com")
 }
 
 /// playlist_tracks_add.js → /playlist/tracks/add（对歌单添加歌曲）。
 pub fn handle_tracks_add(q: &Value, ctx: &Ctx) -> Result<ModuleResponse, ModuleResponse> {
+    ctx.send(&tracks_add_request(q))
+}
+
+fn tracks_add_request(q: &Value) -> RequestOptions {
     let userid_str = param_or_cookie_str(q, "userid", "0");
     let userid: i64 = userid_str.trim().parse().unwrap_or(0);
     let token = param_or_cookie_str(q, "token", "");
-    log::info!("[playlist/tracks/add] userid={}, token={}..., listid={}", userid, if token.len() > 8 { &token[..8] } else { &token }, q_str(q, "listid", ""));
     let clienttime = now_secs();
-    let resource: Vec<Value> = q_str(q, "data", "")
-        .split(',')
-        .map(|s| {
-            let parts: Vec<&str> = s.split('|').collect();
-            json!({
-                "number": 1,
-                "name": parts.get(0).copied().unwrap_or(""),
-                "hash": parts.get(1).copied().unwrap_or(""),
-                "size": 0,
-                "sort": 0,
-                "timelen": 0,
-                "bitrate": 0,
-                "album_id": parts.get(2).and_then(|v| v.parse::<i64>().ok()).unwrap_or(0),
-                "mixsongid": parts.get(3).and_then(|v| v.parse::<i64>().ok()).unwrap_or(0),
-            })
-        })
-        .collect();
+    // Structured data avoids corrupting titles containing legacy CSV delimiters.
+    let resource: Vec<Value> = q.get("data").and_then(Value::as_array).cloned()
+        .unwrap_or_else(|| {
+            q_str(q, "data", "")
+                .split(',')
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| {
+                    let parts: Vec<&str> = s.split('|').collect();
+                    json!({
+                        "number": 1,
+                        "name": parts.first().copied().unwrap_or(""),
+                        "hash": parts.get(1).copied().unwrap_or(""),
+                        "size": 0,
+                        "sort": 0,
+                        "timelen": 0,
+                        "bitrate": 0,
+                        "album_id": parts.get(2).and_then(|v| v.parse::<i64>().ok()).unwrap_or(0),
+                        "mixsongid": parts.get(3).and_then(|v| v.parse::<i64>().ok()).unwrap_or(0),
+                    })
+                })
+                .collect()
+        });
     let mut dm: Map<String, Value> = Map::new();
     if let Some(v) = q.get("listid") {
         if !v.is_null() {
@@ -382,20 +401,25 @@ pub fn handle_tracks_add(q: &Value, ctx: &Ctx) -> Result<ModuleResponse, ModuleR
         "userid": userid,
         "token": token,
     });
-    forward(
-        q, ctx, "post", "/cloudlist.service/v6/add_song", None,
-        Some(params), Some(Value::Object(dm)), "android", &[], false, false,
-    )
+    RequestOptions::new("/cloudlist.service/v6/add_song")
+        .post("/cloudlist.service/v6/add_song")
+        .params(params)
+        .json_body(Value::Object(dm))
+        .encrypt_type("android")
+        .cookie(q_cookie(q))
 }
 
 /// playlist_tracks_del.js → /playlist/tracks/del（对歌单删除歌曲）。
 pub fn handle_tracks_del(q: &Value, ctx: &Ctx) -> Result<ModuleResponse, ModuleResponse> {
+    ctx.send(&tracks_del_request(q))
+}
+
+fn tracks_del_request(q: &Value) -> RequestOptions {
     let userid: i64 = param_or_cookie_str(q, "userid", "0")
         .trim()
         .parse()
         .unwrap_or(0);
     let token = param_or_cookie_str(q, "token", "");
-    let clienttime = now_secs();
     let resource: Vec<Value> = q_str(q, "fileids", "")
         .split(',')
         .filter(|s| !s.is_empty())
@@ -417,14 +441,86 @@ pub fn handle_tracks_del(q: &Value, ctx: &Ctx) -> Result<ModuleResponse, ModuleR
     dm.insert("type".to_string(), json!(0));
     dm.insert("token".to_string(), json!(token));
     dm.insert("list_ver".to_string(), json!(0));
-    let params = json!({
-        "last_time": clienttime,
-        "last_area": "gztx",
-        "userid": userid,
-        "token": token,
-    });
-    forward(
-        q, ctx, "post", "/cloudlist.service/v4/delete_songs", None,
-        Some(params), Some(Value::Object(dm)), "android", &[], false, false,
-    )
+    RequestOptions::new("/v4/delete_songs")
+        .post("/v4/delete_songs")
+        .json_body(Value::Object(dm))
+        .encrypt_type("android")
+        .cookie(q_cookie(q))
+        .header("x-router", "cloudlist.service.kugou.com")
+}
+
+#[cfg(test)]
+mod request_contract_tests {
+    use super::*;
+    use crate::request::BodyData;
+
+    #[test]
+    fn public_playlist_request_uses_global_id_and_exact_offset() {
+        let opts = track_all_request(&json!({
+            "global_collection_id": "collection_3_9876543210_198_0",
+            "id": 7235936, "pagesize": 30, "page": 2, "offset": "35"
+        }));
+        assert_eq!(opts.url, "/pubsongs/v2/get_other_list_file_nofilt");
+        assert_eq!(opts.method, "GET");
+        assert_eq!(opts.params["global_collection_id"], "collection_3_9876543210_198_0");
+        assert_eq!(opts.params["begin_idx"], 35);
+        assert_eq!(opts.params["pagesize"], 30);
+    }
+
+    #[test]
+    fn personal_playlist_request_uses_cloudlist_v3_and_local_listid() {
+        let opts = track_all_new_request(&json!({
+            "listid": "198", "pagesize": 30, "page": 2,
+            "cookie": {"userid": "9876543210", "token": "fixture=="}
+        }));
+        assert_eq!(opts.url, "/v4/get_list_all_file_v3");
+        assert_eq!(opts.method, "POST");
+        assert_eq!(opts.headers["x-router"], "cloudlist.service.kugou.com");
+        let BodyData::Json(body) = opts.data else { panic!("expected a JSON request body") };
+        assert_eq!(body["listid"], "198");
+        assert_eq!(body["userid"], "9876543210");
+        assert_eq!(body["token"], "fixture==");
+        assert_eq!(body["type"], 0);
+        assert_eq!(body["page"], 2);
+    }
+
+    #[test]
+    fn song_addition_preserves_structured_names_and_legacy_csv() {
+        let data = json!([{
+            "number": 1, "name": "Artist - Title, with | delimiters",
+            "hash": "aabbccddeeff00112233445566778899",
+            "album_id": 77, "mixsongid": 88
+        }]);
+        let options = tracks_add_request(&json!({
+            "listid": "198", "data": data,
+            "cookie": {"userid": "123", "token": "fixture=="}
+        }));
+        assert_eq!(options.url, "/cloudlist.service/v6/add_song");
+        assert_eq!(options.method, "POST");
+        let BodyData::Json(body) = options.data else { panic!("expected JSON") };
+        assert_eq!(body["data"], data);
+        assert_eq!(body["listid"], "198");
+        assert_eq!(body["userid"], 123);
+        assert_eq!(body["token"], "fixture==");
+        let legacy = tracks_add_request(&json!({"data": "Artist - Title|hash|77|88"}));
+        let BodyData::Json(body) = legacy.data else { panic!("expected JSON") };
+        assert_eq!(body["data"][0]["name"], "Artist - Title");
+        assert_eq!(body["data"][0]["album_id"], 77);
+        assert_eq!(body["data"][0]["mixsongid"], 88);
+    }
+
+    #[test]
+    fn song_deletion_routes_to_cloudlist_and_sends_numeric_fileids() {
+        let options = tracks_del_request(&json!({
+            "listid": "198", "fileids": "987654321012345,66",
+            "cookie": {"userid": "123", "token": "fixture=="}
+        }));
+        assert_eq!(options.url, "/v4/delete_songs");
+        assert_eq!(options.headers["x-router"], "cloudlist.service.kugou.com");
+        assert_eq!(options.method, "POST");
+        let BodyData::Json(body) = options.data else { panic!("expected JSON") };
+        assert_eq!(body["data"], json!([{"fileid": 987654321012345_i64}, {"fileid": 66}]));
+        assert_eq!(body["listid"], "198");
+        assert_eq!(body["token"], "fixture==");
+    }
 }
