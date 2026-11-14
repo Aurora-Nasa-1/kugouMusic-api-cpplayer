@@ -230,12 +230,23 @@ def main() -> int:
             dst.write(src.read())
         print(f"  + lib/{abi}/{entry_point}  ({size} bytes)")
 
-    # 桌面端如果只有一个库，也在根目录下放一份，方便向后兼容直接回退
-    if args.platform != "android" and len(entries) == 1:
+    # 规范要求：ZIP 根目录必须存在 manifest.entryPoint 对应的动态库文件，
+    # 供宿主 JvmPluginRepositoryIO (verifyRepositoryPackage) / ProviderFactory 校验与直接加载。
+    # Android 多 ABI 时优先选取 arm64-v8a 作为根目录入口；其他平台使用 entries[0][1]。
+    root_src = None
+    if args.platform == "android":
+        for abi, path in entries:
+            if abi == "arm64-v8a":
+                root_src = path
+                break
+    if not root_src and entries:
+        root_src = entries[0][1]
+
+    if root_src:
         root_dest = os.path.join(staging, entry_point)
-        with open(entries[0][1], "rb") as src, open(root_dest, "wb") as dst:
+        with open(root_src, "rb") as src, open(root_dest, "wb") as dst:
             dst.write(src.read())
-        print(f"  + {entry_point}  (根目录兼容)")
+        print(f"  + {entry_point}  (根目录 entryPoint: {os.path.getsize(root_dest)} bytes)")
 
     version = args.version or read_crate_version(root)
 
