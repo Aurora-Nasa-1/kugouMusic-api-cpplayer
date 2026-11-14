@@ -98,6 +98,31 @@ native String analyzeAudioFile(String path);                     // 暂未实现
 
 `legacy-jni-symbols` feature 额外导出三个历史包名的别名符号（`cp.cpplayer.core.provider`、`cp.player.kmp.provider`、`cp.player.provider`），默认不开启。
 
+## C ABI（GraalVM Native Image 宿主）
+
+Windows 的 GraalVM Native Image 构建**不能**走 JNI：JNI 绑定挂在类对象上，宿主为了「每包独立绑定」要按包 `defineClass` 一份 `cp.player.sdk.jni.NativeSession`，而 native image 既不提供类文件资源（`getResource("...class")` 恒为 `null`），也不支持运行时定义类。
+
+所以本库在同一个 DLL 里**额外导出**一套普通 C 符号（`src/sdk/cabi.rs`），宿主用 FFM 按符号直调，一个包一个库句柄即可。JNI 那 7 组符号原样保留，JVM / Android 行为一点不变：
+
+```c
+int32_t cpp_abi_version(void);                    // 必须返回 1：宿主靠它探测，没有就回落 JNI
+int64_t cpp_create(pid, aid, credential /*可空*/, settingsJson, char* err, int32_t errCap);
+int32_t cpp_invoke(handle, operation, const uint8_t* req, int32_t reqLen,
+                   uint8_t* out, int32_t outCap, int32_t* outLen);   // 0 成功 / 1 容量不足 / 2 失败
+void    cpp_cancel(handle);                       // 线程安全、立即返回，不释放句柄
+void    cpp_close(handle);                        // 排空后释放一次
+```
+
+两条硬约定：**内存全部由宿主分配**（Windows 下两个模块可能用不同 CRT 堆，跨 DLL `free` 必崩）；**`outCap` 不足返回 `1`** 并把所需长度写进 `outLen`，宿主扩容后重试（幂等）。响应字节与 JNI 完全一致——`KugouSession::dispatch` 的返回值本身带状态首字节，C ABI 原样拷出，不做二次封装。
+
+原生宿主没有 `JNIEnv`，取不到 `java.io.tmpdir`，所以模块目录按 `KUGOU_MUSIC_DATA_DIR` > Windows `LOCALAPPDATA` > macOS `~/Library/Caches` > `XDG_CACHE_HOME` / `~/.cache` 的顺序解析，都取不到才退回临时目录。
+
+规范见宿主仓库 `docs/dev/PROVIDER_NATIVE_ABI.md`。确认 DLL 里两套符号并存：
+
+```powershell
+dumpbin /EXPORTS target/release/kugou_music_rs.dll | Select-String "cpp_|NativeSession_"
+```
+
 ---
 
 ## 喜欢与歌单写入
