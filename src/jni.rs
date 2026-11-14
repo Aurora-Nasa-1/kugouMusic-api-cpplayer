@@ -2,7 +2,7 @@
 //!
 //! 宿主 JniProvider 规范（`core/src/jvmMain/.../JniProvider.kt`）：
 //!  - `Java_cp_player_core_provider_JniProvider_startNativeServer(String host, int port)`
-//!  - `Java_cp_player_core_provider_JniProvider_nativeCallApi(String method, String paramsJson)`
+//!  - legacy `Java_cp_player_core_provider_JniProvider_nativeCallApi(String method, String paramsJson)`
 //!  - `Java_cp_player_core_provider_JniProvider_analyzeAudioFile(String path)`
 //!
 //! 注意方法签名：`startNativeServer` 是 **(host, port) 两个参数**，不是旧版只有一个 port。
@@ -92,7 +92,7 @@ fn start_native_server_impl(env: &mut JNIEnv, _class: JClass, host: JString, por
     }
 }
 
-/// 核心分发：执行 API 调用并以 Standard v3 JSON 格式返回
+/// 核心分发：执行 API 调用并以旧 JSON 兼容格式返回
 fn native_call_api_impl(env: &mut JNIEnv, _class: JClass, method: JString, params_json: JString) -> jstring {
     ensure_jvm_init(env);
 

@@ -250,6 +250,195 @@ impl MediaResource {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct DrmDescriptor {
+    pub keySystem: String,
+    pub licenseUrl: Option<String>,
+    pub headers: Vec<Header>,
+    pub schemeIdUri: Option<String>,
+    pub initData: Option<Vec<u8>>,
+    pub keyId: Option<Vec<u8>>,
+    pub keyUri: Option<String>,
+    pub serverCertificate: Option<Vec<u8>>,
+    pub persistent: bool,
+}
+
+impl Default for DrmDescriptor {
+    fn default() -> Self {
+        Self {
+            keySystem: String::new(),
+            licenseUrl: None,
+            headers: Vec::new(),
+            schemeIdUri: None,
+            initData: None,
+            keyId: None,
+            keyUri: None,
+            serverCertificate: None,
+            persistent: false,
+        }
+    }
+}
+
+impl DrmDescriptor {
+    pub fn read(r: &mut WireReader) -> Result<Self, String> {
+        Ok(Self {
+            keySystem: r.read_string()?,
+            licenseUrl: r.read_optional(|r| r.read_string())?,
+            headers: r.read_list(|r| Header::read(r))?,
+            schemeIdUri: r.read_optional(|r| r.read_string())?,
+            initData: r.read_optional(|r| r.read_bytes())?,
+            keyId: r.read_optional(|r| r.read_bytes())?,
+            keyUri: r.read_optional(|r| r.read_string())?,
+            serverCertificate: r.read_optional(|r| r.read_bytes())?,
+            persistent: r.read_bool()?,
+        })
+    }
+
+    pub fn write(&self, w: &mut WireWriter) {
+        w.write_string(&self.keySystem);
+        w.write_optional(&self.licenseUrl, |w, v| { w.write_string(v); });
+        w.write_list(&self.headers, |w, v| { v.write(w); });
+        w.write_optional(&self.schemeIdUri, |w, v| { w.write_string(v); });
+        w.write_optional(&self.initData, |w, v| { w.write_bytes(v); });
+        w.write_optional(&self.keyId, |w, v| { w.write_bytes(v); });
+        w.write_optional(&self.keyUri, |w, v| { w.write_string(v); });
+        w.write_optional(&self.serverCertificate, |w, v| { w.write_bytes(v); });
+        w.write_bool(*&self.persistent);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DrmResolveRequest {
+    pub id: String,
+    pub quality: String,
+    pub keySystems: Vec<String>,
+}
+
+impl Default for DrmResolveRequest {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            quality: String::new(),
+            keySystems: Vec::new(),
+        }
+    }
+}
+
+impl DrmResolveRequest {
+    pub fn read(r: &mut WireReader) -> Result<Self, String> {
+        Ok(Self {
+            id: r.read_string()?,
+            quality: r.read_string()?,
+            keySystems: r.read_list(|r| r.read_string())?,
+        })
+    }
+
+    pub fn write(&self, w: &mut WireWriter) {
+        w.write_string(&self.id);
+        w.write_string(&self.quality);
+        w.write_list(&self.keySystems, |w, v| { w.write_string(v); });
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedMedia {
+    pub resource: MediaResource,
+    pub drm: Option<DrmDescriptor>,
+}
+
+impl Default for ResolvedMedia {
+    fn default() -> Self {
+        Self {
+            resource: MediaResource::default(),
+            drm: None,
+        }
+    }
+}
+
+impl ResolvedMedia {
+    pub fn read(r: &mut WireReader) -> Result<Self, String> {
+        Ok(Self {
+            resource: MediaResource::read(r)?,
+            drm: r.read_optional(|r| DrmDescriptor::read(r))?,
+        })
+    }
+
+    pub fn write(&self, w: &mut WireWriter) {
+        self.resource.write(w);
+        w.write_optional(&self.drm, |w, v| { v.write(w); });
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LicenseRequest {
+    pub id: String,
+    pub keySystem: String,
+    pub challenge: Vec<u8>,
+    pub licenseUrl: Option<String>,
+    pub headers: Vec<Header>,
+    pub keyUri: Option<String>,
+}
+
+impl Default for LicenseRequest {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            keySystem: String::new(),
+            challenge: Vec::new(),
+            licenseUrl: None,
+            headers: Vec::new(),
+            keyUri: None,
+        }
+    }
+}
+
+impl LicenseRequest {
+    pub fn read(r: &mut WireReader) -> Result<Self, String> {
+        Ok(Self {
+            id: r.read_string()?,
+            keySystem: r.read_string()?,
+            challenge: r.read_bytes()?,
+            licenseUrl: r.read_optional(|r| r.read_string())?,
+            headers: r.read_list(|r| Header::read(r))?,
+            keyUri: r.read_optional(|r| r.read_string())?,
+        })
+    }
+
+    pub fn write(&self, w: &mut WireWriter) {
+        w.write_string(&self.id);
+        w.write_string(&self.keySystem);
+        w.write_bytes(&self.challenge);
+        w.write_optional(&self.licenseUrl, |w, v| { w.write_string(v); });
+        w.write_list(&self.headers, |w, v| { v.write(w); });
+        w.write_optional(&self.keyUri, |w, v| { w.write_string(v); });
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LicenseResponse {
+    pub license: Vec<u8>,
+}
+
+impl Default for LicenseResponse {
+    fn default() -> Self {
+        Self {
+            license: Vec::new(),
+        }
+    }
+}
+
+impl LicenseResponse {
+    pub fn read(r: &mut WireReader) -> Result<Self, String> {
+        Ok(Self {
+            license: r.read_bytes()?,
+        })
+    }
+
+    pub fn write(&self, w: &mut WireWriter) {
+        w.write_bytes(&self.license);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Failure {
     pub category: String,
     pub message: String,
@@ -1737,20 +1926,40 @@ impl Default for AuthActionRequest {
 
 impl AuthActionRequest {
     pub fn read(r: &mut WireReader) -> Result<Self, String> {
+        let action = r.read_string()?;
+        let email = r.read_optional(|r| r.read_string())?;
+        let phone = r.read_optional(|r| r.read_string())?;
+        let password = r.read_optional(|r| r.read_string())?;
+        let captcha = r.read_optional(|r| r.read_string())?;
+        let md5 = r.read_bool()?;
+        let imageCaptcha = r.read_optional(|r| r.read_string())?;
+        let challengeCookie = r.read_optional(|r| r.read_string())?;
+        let key = r.read_optional(|r| r.read_string())?;
+        let sessionId = r.read_optional(|r| r.read_string())?;
+        let verifyId = r.read_optional(|r| r.read_string())?;
+        let extraJson = r.read_optional(|r| r.read_string())?;
+        let mut countryCode = if r.remaining() > 0 {
+            r.read_optional(|r| r.read_string())?
+        } else {
+            None
+        };
+        if countryCode.is_none() {
+            countryCode = extraJson.as_deref().and_then(country_code_from_extra_json);
+        }
         Ok(Self {
-            action: r.read_string()?,
-            email: r.read_optional(|r| r.read_string())?,
-            phone: r.read_optional(|r| r.read_string())?,
-            password: r.read_optional(|r| r.read_string())?,
-            captcha: r.read_optional(|r| r.read_string())?,
-            md5: r.read_bool()?,
-            imageCaptcha: r.read_optional(|r| r.read_string())?,
-            challengeCookie: r.read_optional(|r| r.read_string())?,
-            key: r.read_optional(|r| r.read_string())?,
-            sessionId: r.read_optional(|r| r.read_string())?,
-            verifyId: r.read_optional(|r| r.read_string())?,
-            extraJson: r.read_optional(|r| r.read_string())?,
-            countryCode: r.read_optional(|r| r.read_string())?,
+            action,
+            email,
+            phone,
+            password,
+            captcha,
+            md5,
+            imageCaptcha,
+            challengeCookie,
+            key,
+            sessionId,
+            verifyId,
+            extraJson,
+            countryCode,
         })
     }
 
@@ -1769,6 +1978,16 @@ impl AuthActionRequest {
         w.write_optional(&self.extraJson, |w, v| { w.write_string(v); });
         w.write_optional(&self.countryCode, |w, v| { w.write_string(v); });
     }
+}
+
+fn country_code_from_extra_json(extra: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(extra).ok()?;
+    value
+        .get("countryCode")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -3703,6 +3922,87 @@ impl CalendarPage {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct EventOrigin {
+    pub id: String,
+    pub user: SocialUser,
+    pub text: String,
+    pub publishedAtEpochMs: i64,
+    pub resourceId: Option<String>,
+    pub resourceType: Option<String>,
+    pub resourceTitle: Option<String>,
+    pub resourceCoverUrl: Option<String>,
+    pub resourceSubtitle: Option<String>,
+    pub imageUrls: Vec<String>,
+    pub liked: bool,
+    pub likedCount: i32,
+    pub commentCount: i32,
+    pub forwardCount: i32,
+    pub location: Option<String>,
+}
+
+impl Default for EventOrigin {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            user: SocialUser::default(),
+            text: String::new(),
+            publishedAtEpochMs: 0,
+            resourceId: None,
+            resourceType: None,
+            resourceTitle: None,
+            resourceCoverUrl: None,
+            resourceSubtitle: None,
+            imageUrls: Vec::new(),
+            liked: false,
+            likedCount: 0,
+            commentCount: 0,
+            forwardCount: 0,
+            location: None,
+        }
+    }
+}
+
+impl EventOrigin {
+    pub fn read(r: &mut WireReader) -> Result<Self, String> {
+        Ok(Self {
+            id: r.read_string()?,
+            user: SocialUser::read(r)?,
+            text: r.read_string()?,
+            publishedAtEpochMs: r.read_long()?,
+            resourceId: r.read_optional(|r| r.read_string())?,
+            resourceType: r.read_optional(|r| r.read_string())?,
+            resourceTitle: r.read_optional(|r| r.read_string())?,
+            resourceCoverUrl: r.read_optional(|r| r.read_string())?,
+            resourceSubtitle: r.read_optional(|r| r.read_string())?,
+            imageUrls: r.read_list(|r| r.read_string())?,
+            liked: r.read_bool()?,
+            likedCount: r.read_int()?,
+            commentCount: r.read_int()?,
+            forwardCount: r.read_int()?,
+            location: r.read_optional(|r| r.read_string())?,
+        })
+    }
+
+    pub fn write(&self, w: &mut WireWriter) {
+        w.write_string(&self.id);
+        self.user.write(w);
+        w.write_string(&self.text);
+        w.write_long(*&self.publishedAtEpochMs);
+        w.write_optional(&self.resourceId, |w, v| { w.write_string(v); });
+        w.write_optional(&self.resourceType, |w, v| { w.write_string(v); });
+        w.write_optional(&self.resourceTitle, |w, v| { w.write_string(v); });
+        w.write_optional(&self.resourceCoverUrl, |w, v| { w.write_string(v); });
+        w.write_optional(&self.resourceSubtitle, |w, v| { w.write_string(v); });
+        w.write_list(&self.imageUrls, |w, v| { w.write_string(v); });
+        w.write_bool(*&self.liked);
+        w.write_int(*&self.likedCount);
+        w.write_int(*&self.commentCount);
+        w.write_int(*&self.forwardCount);
+        w.write_optional(&self.location, |w, v| { w.write_string(v); });
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct SocialEvent {
     pub id: String,
     pub user: SocialUser,
@@ -3710,7 +4010,16 @@ pub struct SocialEvent {
     pub publishedAtEpochMs: i64,
     pub resourceId: Option<String>,
     pub resourceType: Option<String>,
+    pub resourceTitle: Option<String>,
+    pub resourceCoverUrl: Option<String>,
+    pub resourceSubtitle: Option<String>,
     pub imageUrls: Vec<String>,
+    pub liked: bool,
+    pub likedCount: i32,
+    pub commentCount: i32,
+    pub forwardCount: i32,
+    pub forwardedFrom: Option<EventOrigin>,
+    pub location: Option<String>,
 }
 
 impl Default for SocialEvent {
@@ -3722,7 +4031,16 @@ impl Default for SocialEvent {
             publishedAtEpochMs: 0,
             resourceId: None,
             resourceType: None,
+            resourceTitle: None,
+            resourceCoverUrl: None,
+            resourceSubtitle: None,
             imageUrls: Vec::new(),
+            liked: false,
+            likedCount: 0,
+            commentCount: 0,
+            forwardCount: 0,
+            forwardedFrom: None,
+            location: None,
         }
     }
 }
@@ -3736,7 +4054,16 @@ impl SocialEvent {
             publishedAtEpochMs: r.read_long()?,
             resourceId: r.read_optional(|r| r.read_string())?,
             resourceType: r.read_optional(|r| r.read_string())?,
+            resourceTitle: r.read_optional(|r| r.read_string())?,
+            resourceCoverUrl: r.read_optional(|r| r.read_string())?,
+            resourceSubtitle: r.read_optional(|r| r.read_string())?,
             imageUrls: r.read_list(|r| r.read_string())?,
+            liked: r.read_bool()?,
+            likedCount: r.read_int()?,
+            commentCount: r.read_int()?,
+            forwardCount: r.read_int()?,
+            forwardedFrom: r.read_optional(|r| EventOrigin::read(r))?,
+            location: r.read_optional(|r| r.read_string())?,
         })
     }
 
@@ -3747,7 +4074,16 @@ impl SocialEvent {
         w.write_long(*&self.publishedAtEpochMs);
         w.write_optional(&self.resourceId, |w, v| { w.write_string(v); });
         w.write_optional(&self.resourceType, |w, v| { w.write_string(v); });
+        w.write_optional(&self.resourceTitle, |w, v| { w.write_string(v); });
+        w.write_optional(&self.resourceCoverUrl, |w, v| { w.write_string(v); });
+        w.write_optional(&self.resourceSubtitle, |w, v| { w.write_string(v); });
         w.write_list(&self.imageUrls, |w, v| { w.write_string(v); });
+        w.write_bool(*&self.liked);
+        w.write_int(*&self.likedCount);
+        w.write_int(*&self.commentCount);
+        w.write_int(*&self.forwardCount);
+        w.write_optional(&self.forwardedFrom, |w, v| { v.write(w); });
+        w.write_optional(&self.location, |w, v| { w.write_string(v); });
     }
 }
 
@@ -3876,6 +4212,39 @@ impl ForwardEventRequest {
         w.write_string(&self.eventId);
         w.write_string(&self.userId);
         w.write_string(&self.text);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResourceLikeRequest {
+    pub id: String,
+    pub r#type: String,
+    pub liked: bool,
+}
+
+impl Default for ResourceLikeRequest {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            r#type: String::new(),
+            liked: false,
+        }
+    }
+}
+
+impl ResourceLikeRequest {
+    pub fn read(r: &mut WireReader) -> Result<Self, String> {
+        Ok(Self {
+            id: r.read_string()?,
+            r#type: r.read_string()?,
+            liked: r.read_bool()?,
+        })
+    }
+
+    pub fn write(&self, w: &mut WireWriter) {
+        w.write_string(&self.id);
+        w.write_string(&self.r#type);
+        w.write_bool(*&self.liked);
     }
 }
 

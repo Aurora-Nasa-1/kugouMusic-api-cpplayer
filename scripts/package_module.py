@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""把编译好的 JNI 动态库打包成 CPPlayer 可直接导入的 Standard v3 模块 zip。
+"""把编译好的原生动态库打包成 CPPlayer 可直接导入的 kmp-sdk-v1 模块 zip。
 
 打包布局（符合 CPPlayer 宿主 PlatformSupport.resolveEntryPoint 规范）：
 
@@ -126,7 +126,7 @@ def parse_lib_args(pairs: list[str]) -> list[tuple[str, str]]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="打包 CPPlayer JNI 模块 zip (Standard v3)")
+    parser = argparse.ArgumentParser(description="打包 CPPlayer 原生模块 zip (kmp-sdk-v1)")
     parser.add_argument(
         "--platform",
         required=False,
@@ -174,8 +174,13 @@ def main() -> int:
         for key in ("id", "name", "version", "type", "entryPoint"):
             if not base.get(key):
                 die(f"packaging/manifest.json 缺少必需字段: {key}")
-        if base.get("type") != "jni":
-            die(f"packaging/manifest.json 的 type 必须是 jni，收到 {base.get('type')!r}")
+        if base.get("type") != "native":
+            die(f"packaging/manifest.json 的 type 必须是 native，收到 {base.get('type')!r}")
+        if base.get("contract") != "kmp-sdk-v1":
+            die(
+                "packaging/manifest.json 的 contract 必须是 kmp-sdk-v1，"
+                f"收到 {base.get('contract')!r}"
+            )
         crate = read_crate_version(root)
         if base.get("version") != crate:
             die(f"版本漂移：manifest={base.get('version')} Cargo.toml={crate}")
@@ -251,16 +256,17 @@ def main() -> int:
     version = args.version or read_crate_version(root)
 
     manifest = load_base_manifest(root)
-    # 与产物强相关的字段由脚本决定；capabilities / apiMap / minHostApiVersion
+    # 与产物强相关的字段由脚本决定；capabilities / minHostApiVersion
     # 等一律沿用 packaging/manifest.json，避免两处维护、悄悄漂移。
     manifest["id"] = args.module_id or manifest.get("id") or DEFAULT_ID
     manifest["name"] = args.name or manifest.get("name") or DEFAULT_NAME
     manifest["version"] = version
-    manifest["type"] = "jni"
+    manifest["type"] = "native"
     manifest["entryPoint"] = entry_point
     manifest["supportedAbis"] = abis
-    manifest.setdefault("contract", "kmp-sdk-v1")
+    manifest["contract"] = "kmp-sdk-v1"
     manifest.pop("apiMap", None)
+    manifest.pop("targetAppPackage", None)
     manifest.pop("nativeFactoryClass", None)
 
     manifest_path = os.path.join(staging, "manifest.json")

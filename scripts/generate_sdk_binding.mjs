@@ -10,13 +10,14 @@ const schema = (await import(`file:///${kmpRoot.replace(/\\/g, "/")}/provider-co
 const keywords = new Set(["type", "match", "move", "ref", "fn", "in", "for", "let", "mut", "loop", "where", "self", "super", "crate", "as"]);
 const rustFieldName = (f) => keywords.has(f) ? `r#${f}` : f;
 
-const rustType = (t) => {
+const rustType = (t, owner) => {
   if (t.endsWith("?")) {
-    const inner = rustType(t.slice(0, -1));
-    return `Option<${inner}>`;
+    const inner = t.slice(0, -1);
+    if (inner === owner) return `Option<Box<${owner}>>`;
+    return `Option<${rustType(inner, owner)}>`;
   }
   if (t.endsWith("[]")) {
-    const inner = rustType(t.slice(0, -2));
+    const inner = rustType(t.slice(0, -2), owner);
     return `Vec<${inner}>`;
   }
   if (t === "string") return "String";
@@ -27,14 +28,17 @@ const rustType = (t) => {
   return t; // Custom record
 };
 
-const rustReadExpr = (t) => {
+const rustReadExpr = (t, owner) => {
   if (t.endsWith("?")) {
     const inner = t.slice(0, -1);
+    if (inner === owner) {
+      return `r.read_optional(|r| ${owner}::read(r).map(Box::new))`;
+    }
     return `r.read_optional(|r| ${rustReadExpr(inner)})`;
   }
   if (t.endsWith("[]")) {
     const inner = t.slice(0, -2);
-    return `r.read_list(|r| ${rustReadExpr(inner)})`;
+    return `r.read_list(|r| ${rustReadExpr(inner, owner)})`;
   }
   if (t === "string") return "r.read_string()";
   if (t === "int") return "r.read_int()";
@@ -91,7 +95,7 @@ for (const [name, fields] of Object.entries(schema.records)) {
   rustCode += `#[derive(Debug, Clone, PartialEq)]\n`;
   rustCode += `pub struct ${name} {\n`;
   for (const [f, t] of Object.entries(fields)) {
-    rustCode += `    pub ${rustFieldName(f)}: ${rustType(t)},\n`;
+    rustCode += `    pub ${rustFieldName(f)}: ${rustType(t, name)},\n`;
   }
   rustCode += `}\n\n`;
 
@@ -104,11 +108,53 @@ for (const [name, fields] of Object.entries(schema.records)) {
 
   rustCode += `impl ${name} {\n`;
   rustCode += `    pub fn read(r: &mut WireReader) -> Result<Self, String> {\n`;
-  rustCode += `        Ok(Self {\n`;
-  for (const [f, t] of Object.entries(fields)) {
-    rustCode += `            ${rustFieldName(f)}: ${rustReadExpr(t)}?,\n`;
+  if (name === "AuthActionRequest") {
+    // Native v1 writes the 12 positional auth fields but mirrors this
+    // auth-only field into extraJson. Keep accepting the full schema layout
+    // as well so our own writer and contract tests remain valid.
+    rustCode += `        let action = r.read_string()?;\n`;
+    rustCode += `        let email = r.read_optional(|r| r.read_string())?;\n`;
+    rustCode += `        let phone = r.read_optional(|r| r.read_string())?;\n`;
+    rustCode += `        let password = r.read_optional(|r| r.read_string())?;\n`;
+    rustCode += `        let captcha = r.read_optional(|r| r.read_string())?;\n`;
+    rustCode += `        let md5 = r.read_bool()?;\n`;
+    rustCode += `        let imageCaptcha = r.read_optional(|r| r.read_string())?;\n`;
+    rustCode += `        let challengeCookie = r.read_optional(|r| r.read_string())?;\n`;
+    rustCode += `        let key = r.read_optional(|r| r.read_string())?;\n`;
+    rustCode += `        let sessionId = r.read_optional(|r| r.read_string())?;\n`;
+    rustCode += `        let verifyId = r.read_optional(|r| r.read_string())?;\n`;
+    rustCode += `        let extraJson = r.read_optional(|r| r.read_string())?;\n`;
+    rustCode += `        let mut countryCode = if r.remaining() > 0 {\n`;
+    rustCode += `            r.read_optional(|r| r.read_string())?\n`;
+    rustCode += `        } else {\n`;
+    rustCode += `            None\n`;
+    rustCode += `        };\n`;
+    rustCode += `        if countryCode.is_none() {\n`;
+    rustCode += `            countryCode = extraJson.as_deref().and_then(country_code_from_extra_json);\n`;
+    rustCode += `        }\n`;
+    rustCode += `        Ok(Self {\n`;
+    rustCode += `            action,\n`;
+    rustCode += `            email,\n`;
+    rustCode += `            phone,\n`;
+    rustCode += `            password,\n`;
+    rustCode += `            captcha,\n`;
+    rustCode += `            md5,\n`;
+    rustCode += `            imageCaptcha,\n`;
+    rustCode += `            challengeCookie,\n`;
+    rustCode += `            key,\n`;
+    rustCode += `            sessionId,\n`;
+    rustCode += `            verifyId,\n`;
+    rustCode += `            extraJson,\n`;
+    rustCode += `            countryCode,\n`;
+    rustCode += `        })\n`;
+  } else {
+    rustCode += `        Ok(Self {\n`;
+    for (const [f, t] of Object.entries(fields)) {
+      rustCode += `            ${rustFieldName(f)}: ${rustReadExpr(t, name)}?,\n`;
+    }
+    rustCode += `        })\n`;
   }
-  rustCode += `        })\n    }\n\n`;
+  rustCode += `    }\n\n`;
 
   rustCode += `    pub fn write(&self, w: &mut WireWriter) {\n`;
   for (const [f, t] of Object.entries(fields)) {
@@ -116,6 +162,18 @@ for (const [name, fields] of Object.entries(schema.records)) {
   }
   rustCode += `    }\n`;
   rustCode += `}\n\n`;
+
+  if (name === "AuthActionRequest") {
+    rustCode += `fn country_code_from_extra_json(extra: &str) -> Option<String> {\n`;
+    rustCode += `    let value: serde_json::Value = serde_json::from_str(extra).ok()?;\n`;
+    rustCode += `    value\n`;
+    rustCode += `        .get("countryCode")\n`;
+    rustCode += `        .and_then(|v| v.as_str())\n`;
+    rustCode += `        .map(str::trim)\n`;
+    rustCode += `        .filter(|v| !v.is_empty())\n`;
+    rustCode += `        .map(ToOwned::to_owned)\n`;
+    rustCode += `}\n\n`;
+  }
 }
 
 mkdirSync(resolve(root, "src/sdk"), { recursive: true });

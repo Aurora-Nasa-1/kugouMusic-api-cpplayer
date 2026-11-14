@@ -1,6 +1,7 @@
-//! CPPlayer Standard v3 API 适配层
+//! CPPlayer 旧 JSON API 兼容层（内部调试/历史入口）
 //!
-//! 实现 CPPlayer-KMP Standard v3 规范：
+//! 新的宿主契约是 `kmp-sdk-v1` 类型化 Wire 协议；本文件只保留旧的扁平 JSON
+//! 适配，供内部调试和历史 HTTP/JNI 入口使用：
 //!  - 扁平数据模型：tracks: [ { id, title, artist, album, duration, coverUrl } ]
 //!  - 播放直链模型：{ url, format, quality, headers }
 //!  - 歌词模型：{ lyric }
@@ -18,7 +19,7 @@ mod library;
 const RANK_PLAYLIST_BASE: i64 = 1 << 52;
 const RANK_PLAYLIST_SPAN: i64 = 1 << 32;
 
-/// 统一入口：根据 Standard v3 方法名进行分派转换
+/// 统一入口：根据旧 JSON 方法名进行分派转换
 pub fn handle_api(method: &str, params: &Value) -> Value {
     let params = normalize_standard_params(params);
     let params = &params;
@@ -35,8 +36,7 @@ pub fn handle_api(method: &str, params: &Value) -> Value {
             "data": {
                 "id": "kugou-music-rs",
                 "version": env!("CARGO_PKG_VERSION"),
-                "contract": "standard",
-                "apiVersion": 3
+                "contract": "kmp-sdk-v1"
             }
         }),
         // 1. 歌曲搜索
@@ -108,6 +108,7 @@ pub fn handle_api(method: &str, params: &Value) -> Value {
         "comment/music" | "comment/new" => handle_comments(params, &ctx),
         "comment/floor" => handle_comment_floor(params, &ctx),
         "comment" => handle_comment_create(params, &ctx),
+        "comment/delete" => handle_comment_delete(params, &ctx),
 
         // 15. 回退：透传匹配原生路由
         other => handle_fallback(other, params, &ctx),
@@ -131,7 +132,7 @@ fn normalize_standard_params(params: &Value) -> Value {
     normalized
 }
 
-/// 转换单首酷狗歌曲为 Standard v3 规范结构
+/// 转换单首酷狗歌曲为扁平 JSON 兼容结构
 pub fn transform_kugou_song(item: &Value) -> Option<Value> {
     // 1. 提取唯一 ID（优先使用音频 Hash；详情接口有时只给 numeric id）
     let hash = first_string(item, &[
@@ -599,7 +600,8 @@ fn handle_song_url(params: &Value, ctx: &Ctx) -> Value {
 
     let quality = match level {
         "standard" => "128",
-        "higher" | "exhigh" => "320",
+        "higher" => "192",
+        "exhigh" => "320",
         "lossless" | "jymaster" | "sky" | "dolby" => "flac",
         "hires" => "high",
         other => other,
@@ -631,6 +633,7 @@ fn song_url_response(body: &Value, level: &str, requested_quality: &str) -> Valu
             .unwrap_or(requested_quality);
         let actual_level = match quality {
             "128" => "standard",
+            "192" => "higher",
             "320" => "exhigh",
             "flac" => "lossless",
             "high" => "hires",
@@ -2058,139 +2061,492 @@ fn standard_comment(item: &Value, parent_override: i64) -> Option<Value> {
     }))
 }
 
-fn handle_comments(params: &Value, ctx: &Ctx) -> Value {
+#[derive(Clone, Debug)]
+struct CommentResource {
+    resource_type: &'static str,
+    mixsongid: String,
+    childrenid: String,
+    name: String,
+}
+
+fn comment_resource_type(value: &str) -> Option<&'static str> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "music" | "song" | "audio" | "track" => Some("song"),
+        "album" => Some("album"),
+        "playlist" | "special" => Some("playlist"),
+        _ => None,
+    }
+}
+
+fn optional_i64(root: &Value, paths: &[&str]) -> Option<i64> {
+    paths.iter().find_map(|path| root.pointer(path).and_then(value_to_i64))
+}
+
+fn optional_bool(root: &Value, paths: &[&str]) -> Option<bool> {
+    paths.iter().find_map(|path| {
+        root.pointer(path).and_then(|value| match value {
+            Value::Bool(value) => Some(*value),
+            Value::Number(value) => value.as_i64().map(|value| value == 1),
+            Value::String(value) => match value.trim().to_ascii_lowercase().as_str() {
+                "true" | "1" => Some(true),
+                "false" | "0" => Some(false),
+                _ => None,
+            },
+            _ => None,
+        })
+    })
+}
+
+fn comment_body_error(body: &Value) -> Option<String> {
+    let status = optional_i64(body, &["/status", "/data/status"]);
+    let error = optional_i64(
+        body,
+        &[
+            "/error_code",
+            "/errcode",
+            "/data/error_code",
+            "/data/errcode",
+        ],
+    );
+    if status.is_some_and(|status| status != 1 && status != 200)
+        || error.is_some_and(|error| error != 0)
+    {
+        let message = first_string(
+            body,
+            &["/errmsg", "/msg", "/message", "/data/errmsg", "/data/msg"],
+        );
+        return Some(if message.is_empty() {
+            format!(
+                "Kugou comment request failed (status={}, error={})",
+                status.unwrap_or(0),
+                error.unwrap_or(0)
+            )
+        } else {
+            message
+        });
+    }
+    None
+}
+
+fn first_comment_object(body: &Value) -> Option<&Value> {
+    let data = body.get("data");
+    if let Some(comment) = data.and_then(|data| data.get("comment")) {
+        return Some(comment);
+    }
+    if let Some(data) = data.filter(|data| {
+        data.get("commentId")
+            .or_else(|| data.get("comment_id"))
+            .or_else(|| data.get("cid"))
+            .is_some()
+    }) {
+        return Some(data);
+    }
+    if let Some(comment) = body.get("comment") {
+        return Some(comment);
+    }
+    first_array(
+        body,
+        &["/data/list", "/data/comments", "/list", "/comments"],
+    )
+    .and_then(|items| items.first())
+}
+
+fn resolve_song_comment_resource(
+    id: &str,
+    params: &Value,
+    ctx: &Ctx,
+) -> Result<(String, String), Value> {
     let mut query = params.clone();
-    if query.get("mixsongid").is_none() {
-        if let Some(id) = params.get("id") {
-            query["mixsongid"] = id.clone();
+    query["hash"] = json!(id);
+    let mut cookie = params.get("cookie").cloned().unwrap_or_else(|| json!({}));
+    crate::device::merge_device_identity(&mut cookie);
+    query["cookie"] = cookie;
+
+    let body = match crate::modules::audio::handle(&query, ctx) {
+        Ok(resp) => resp.body.to_json(),
+        Err(resp) => resp.body.to_json(),
+    };
+    if let Some(message) = comment_body_error(&body) {
+        return Err(json!({"code": 502, "msg": message}));
+    }
+    let item = body
+        .get("data")
+        .and_then(|data| {
+            data.as_array()
+                .and_then(|items| items.first())
+                .or_else(|| data.as_object().map(|_| data))
+        })
+        .ok_or_else(|| json!({"code": 404, "msg": "Kugou song detail is unavailable"}))?;
+    let mixsongid = first_i64(
+        item,
+        &[
+            "/album_audio_id",
+            "/mixsongid",
+            "/MixSongID",
+            "/base/album_audio_id",
+        ],
+    );
+    if mixsongid <= 0 {
+        return Err(json!({
+            "code": 502,
+            "msg": "Kugou song detail has no album_audio_id for comments"
+        }));
+    }
+    let name = first_string(
+        item,
+        &[
+            "/audio_name",
+            "/songname",
+            "/FileName",
+            "/filename",
+            "/base/audio_name",
+        ],
+    );
+    Ok((mixsongid.to_string(), name))
+}
+
+fn resolve_comment_children(
+    mixsongid: &str,
+    params: &Value,
+    ctx: &Ctx,
+) -> Result<(String, String), Value> {
+    let mut query = params.clone();
+    query["mixsongid"] = json!(mixsongid);
+    query["page"] = json!(1);
+    query["pagesize"] = json!(1);
+    let body = match crate::modules::comment_music::handle(&query, ctx) {
+        Ok(resp) => resp.body.to_json(),
+        Err(resp) => resp.body.to_json(),
+    };
+    if let Some(message) = comment_body_error(&body) {
+        return Err(json!({"code": 502, "msg": message}));
+    }
+    let first = first_array(
+        &body,
+        &["/data/list", "/data/comments", "/list", "/comments"],
+    )
+    .and_then(|items| items.first());
+    let mut childrenid = first_string(&body, &["/data/childrenid", "/childrenid"]);
+    if childrenid.is_empty() {
+        if let Some(item) = first {
+            childrenid = first_string(item, &["/special_child_id", "/childrenid"]);
         }
     }
-    if query.get("childrenid").is_none() {
-        if let Some(id) = params.get("id") {
-            query["childrenid"] = id.clone();
+    if childrenid.is_empty() {
+        return Err(json!({
+            "code": 502,
+            "msg": "Kugou comment list has no childrenid"
+        }));
+    }
+    let name = first
+        .map(|item| {
+            first_string(
+                item,
+                &["/special_child_name", "/song_show_text", "/childrenname"],
+            )
+        })
+        .unwrap_or_default();
+    Ok((childrenid, name))
+}
+
+fn resolve_comment_resource(
+    params: &Value,
+    ctx: &Ctx,
+    need_children: bool,
+) -> Result<CommentResource, Value> {
+    let id = first_string(params, &["/id", "/hash"]);
+    if id.is_empty() {
+        return Err(json!({"code": 400, "msg": "Missing comment resource id"}));
+    }
+    if id.parse::<i64>().is_ok_and(|id| id <= 0) {
+        return Err(json!({"code": 400, "msg": "Comment resource id must be positive"}));
+    }
+    let requested_type = first_string(params, &["/type", "/resourceType", "/resource_type"]);
+    let resource_type = comment_resource_type(&requested_type).ok_or_else(|| {
+        json!({
+            "code": 400,
+            "msg": format!("Unsupported comment resource type: {requested_type}")
+        })
+    })?;
+    if resource_type != "song" {
+        return Ok(CommentResource {
+            resource_type,
+            mixsongid: String::new(),
+            childrenid: id,
+            name: first_string(params, &["/name", "/title"]),
+        });
+    }
+
+    let explicit_mix = first_string(params, &["/mixsongid", "/album_audio_id"]);
+    let numeric_id = id.parse::<i64>().ok().filter(|id| *id > 0);
+    let (mixsongid, mut name) = if !explicit_mix.is_empty() {
+        (
+            explicit_mix,
+            first_string(params, &["/name", "/song_name", "/childrenname"]),
+        )
+    } else if let Some(mixsongid) = numeric_id {
+        (
+            mixsongid.to_string(),
+            first_string(params, &["/name", "/song_name", "/childrenname"]),
+        )
+    } else {
+        resolve_song_comment_resource(&id, params, ctx)?
+    };
+    let mut childrenid = first_string(params, &["/childrenid", "/special_id"]);
+    if childrenid.is_empty() && need_children {
+        let (resolved, resolved_name) = resolve_comment_children(&mixsongid, params, ctx)?;
+        childrenid = resolved;
+        if name.is_empty() {
+            name = resolved_name;
         }
     }
-    if query.get("page").is_none() {
-        if let Some(page) = params.get("pageNo") {
-            query["page"] = page.clone();
-        }
+    Ok(CommentResource {
+        resource_type,
+        mixsongid,
+        childrenid,
+        name,
+    })
+}
+
+fn comment_page_size(params: &Value) -> i64 {
+    params
+        .get("pagesize")
+        .or_else(|| params.get("pageSize"))
+        .or_else(|| params.get("limit"))
+        .and_then(value_to_i64)
+        .unwrap_or(30)
+        .max(1)
+}
+
+fn comment_floor_page(params: &Value) -> i64 {
+    if let Some(page) = params
+        .get("page")
+        .and_then(value_to_i64)
+        .filter(|page| *page > 0)
+    {
+        return page;
     }
-    if query.get("pagesize").is_none() {
-        if let Some(size) = params.get("pageSize") {
-            query["pagesize"] = size.clone();
-        }
+    match params.get("time").and_then(value_to_i64).unwrap_or(0) {
+        0 => 1,
+        time => time.max(1),
     }
+}
+
+fn effective_comment_sort_type(resource_type: &str, sort_type: i64) -> i64 {
+    match (resource_type, sort_type) {
+        ("song", 2) => 2,
+        ("song", 3) => 3,
+        _ => 1,
+    }
+}
+
+fn handle_comments(params: &Value, ctx: &Ctx) -> Value {
     let sort_type = params.get("sortType").and_then(value_to_i64).unwrap_or(1);
-    let comment_result = match sort_type {
-        2 => crate::modules::comment_more::handle_music_topliked(&query, ctx),
-        3 => crate::modules::comment_more::handle_music_classify(&query, ctx),
+    let resource = match resolve_comment_resource(params, ctx, matches!(sort_type, 2 | 3)) {
+        Ok(resource) => resource,
+        Err(error) => return error,
+    };
+    // Host CommentPageRequest carries a zero-based item offset. Upstream comment
+    // endpoints page by page number, so convert offset/limit before dispatch.
+    let mut query = with_page_params(params);
+    query["mixsongid"] = json!(resource.mixsongid);
+    query["childrenid"] = json!(resource.childrenid);
+    query["resource_type"] = json!(resource.resource_type);
+    let effective_sort_type = effective_comment_sort_type(resource.resource_type, sort_type);
+    let comment_result = match (resource.resource_type, effective_sort_type) {
+        ("album", _) => crate::modules::comment_more::handle_album(&query, ctx),
+        ("playlist", _) => crate::modules::comment_more::handle_playlist(&query, ctx),
+        (_, 2) => crate::modules::comment_more::handle_music_topliked(&query, ctx),
+        (_, 3) => crate::modules::comment_more::handle_music_classify(&query, ctx),
         _ => crate::modules::comment_music::handle(&query, ctx),
     };
-    match comment_result {
-        Ok(resp) => {
-            let body = resp.body.to_json();
-            let mut comments = Vec::new();
-            let list = first_array(&body, &["/data/list", "/data/comments", "/list", "/comments"]);
-            if let Some(items) = list {
-                comments.extend(items.iter().filter_map(|item| standard_comment(item, 0)));
-            }
-            let total = first_i64(&body, &["/data/totalCount", "/data/total", "/data/count", "/total"]);
-            let page_size = params
-                .get("pageSize")
-                .or_else(|| params.get("pagesize"))
-                .and_then(value_to_i64)
-                .unwrap_or(30)
-                .max(1);
-            let has_more = body
-                .pointer("/data/hasMore")
-                .or_else(|| body.pointer("/data/more"))
-                .and_then(|v| v.as_bool())
-                .unwrap_or(comments.len() as i64 >= page_size);
-            json!({
-                "code": 0,
-                "data": {
-                    "totalCount": total,
-                    "hasMore": has_more,
-                    "cursor": first_string(&body, &["/data/cursor", "/cursor"]),
-                    "sortType": params.get("sortType").and_then(value_to_i64).unwrap_or(1),
-                    "comments": comments
-                }
-            })
-        }
-        Err(_) => json!({
-            "code": 500,
-            "msg": "Failed to get comments",
-            "data": {
-                "totalCount": 0,
-                "hasMore": false,
-                "comments": []
-            }
-        }),
+    let body = match comment_result {
+        Ok(resp) => resp.body.to_json(),
+        Err(resp) => resp.body.to_json(),
+    };
+    if let Some(message) = comment_body_error(&body) {
+        return json!({"code": 502, "msg": message});
     }
+
+    let mut comments = Vec::new();
+    if let Some(items) = first_array(&body, &["/data/list", "/data/comments", "/list", "/comments"]) {
+        comments.extend(items.iter().filter_map(|item| standard_comment(item, 0)));
+    }
+    let offset = params.get("offset").and_then(value_to_i64).unwrap_or(0).max(0);
+    let count = comments.len() as i64;
+    let reported_total = optional_i64(
+        &body,
+        &["/data/totalCount", "/data/total", "/data/count", "/total"],
+    );
+    let has_more = optional_bool(&body, &["/data/hasMore", "/data/has_more", "/data/more"])
+        .unwrap_or_else(|| {
+            reported_total.is_some_and(|total| offset.saturating_add(count) < total)
+        });
+    let total = reported_total
+        .map(|total| total.max(offset.saturating_add(count)))
+        .unwrap_or(0);
+    json!({
+        "code": 0,
+        "data": {
+            "totalCount": total,
+            "hasMore": has_more,
+            "cursor": first_string(&body, &["/data/cursor", "/cursor"]),
+            "sortType": effective_sort_type,
+            "comments": comments
+        }
+    })
 }
 
 fn handle_comment_floor(params: &Value, ctx: &Ctx) -> Value {
+    let resource = match resolve_comment_resource(params, ctx, true) {
+        Ok(resource) => resource,
+        Err(error) => return error,
+    };
+    let parent = params
+        .get("parentCommentId")
+        .or_else(|| params.get("comment_id"))
+        .and_then(value_to_i64)
+        .unwrap_or(0);
+    if parent <= 0 {
+        return json!({"code": 400, "msg": "Missing parent comment id"});
+    }
     let mut query = params.clone();
-    if let Some(id) = params.get("id") {
-        query["special_id"] = id.clone();
+    query["special_id"] = json!(resource.childrenid);
+    query["childrenid"] = json!(resource.childrenid);
+    query["mixsongid"] = json!(resource.mixsongid);
+    query["tid"] = json!(parent);
+    query["resource_type"] = json!(resource.resource_type);
+    let body = match crate::modules::comment_more::handle_floor(&query, ctx) {
+        Ok(resp) => resp.body.to_json(),
+        Err(resp) => resp.body.to_json(),
+    };
+    if let Some(message) = comment_body_error(&body) {
+        return json!({"code": 502, "msg": message});
     }
-    if let Some(parent) = params.get("parentCommentId") {
-        query["tid"] = parent.clone();
-    }
-    query["resource_type"] = json!("music");
-    if query.get("page").is_none() {
-        if let Some(page) = params.get("pageNo") {
-            query["page"] = page.clone();
+    let comments = first_array(&body, &["/data/list", "/data/comments", "/list", "/comments"])
+        .into_iter()
+        .flatten()
+        .filter_map(|item| standard_comment(item, parent))
+        .collect::<Vec<_>>();
+    let page = comment_floor_page(params);
+    let page_size = comment_page_size(params);
+    let offset = page.saturating_sub(1).saturating_mul(page_size);
+    let count = comments.len() as i64;
+    let reported_total = optional_i64(
+        &body,
+        &["/data/totalCount", "/data/total", "/data/count"],
+    );
+    let has_more = optional_bool(&body, &["/data/hasMore", "/data/has_more", "/data/more"])
+        .unwrap_or_else(|| {
+            reported_total.is_some_and(|total| offset.saturating_add(count) < total)
+        });
+    let total = reported_total
+        .map(|total| total.max(offset.saturating_add(count)))
+        .unwrap_or(0);
+    let next_time = if has_more {
+        page.saturating_add(1)
+    } else {
+        page
+    };
+    json!({
+        "code": 0,
+        "data": {
+            "comments": comments,
+            "totalCount": total,
+            "hasMore": has_more,
+            "time": next_time
         }
-    }
-    if query.get("pagesize").is_none() {
-        if let Some(size) = params.get("pageSize") {
-            query["pagesize"] = size.clone();
-        }
-    }
-    match crate::modules::comment_more::handle_floor(&query, ctx) {
-        Ok(resp) => {
-            let body = resp.body.to_json();
-            let parent = params
-                .get("parentCommentId")
-                .and_then(value_to_i64)
-                .unwrap_or(0);
-            let comments = first_array(&body, &["/data/list", "/data/comments", "/list", "/comments"])
-                .into_iter()
-                .flatten()
-                .filter_map(|item| standard_comment(item, parent))
-                .collect::<Vec<_>>();
-            json!({
-                "code": 0,
-                "data": {
-                    "comments": comments,
-                    "totalCount": first_i64(&body, &["/data/totalCount", "/data/total", "/data/count"]),
-                    "hasMore": body.pointer("/data/hasMore").and_then(|v| v.as_bool()).unwrap_or(false),
-                    "time": first_i64(&body, &["/data/time", "/time"])
-                }
-            })
-        }
-        Err(_) => json!({
-            "code": 500,
-            "msg": "Failed to get comment floor",
-            "data": { "comments": [], "totalCount": 0, "hasMore": false, "time": 0 }
-        }),
-    }
+    })
 }
 
 fn handle_comment_create(params: &Value, ctx: &Ctx) -> Value {
+    let content = first_string(params, &["/content"]);
+    if content.trim().is_empty() {
+        return json!({"code": 400, "msg": "Comment content must not be empty"});
+    }
+    let reply_id = params
+        .get("reply_id")
+        .or_else(|| params.get("replyToCommentId"))
+        .and_then(value_to_i64)
+        .filter(|id| *id > 0);
+    let parent_id = params
+        .get("parentCommentId")
+        .and_then(value_to_i64)
+        .filter(|id| *id > 0);
+    let resource = match resolve_comment_resource(params, ctx, reply_id.is_some()) {
+        Ok(resource) => resource,
+        Err(error) => return error,
+    };
     let mut query = params.clone();
-    if let Some(id) = params.get("id") {
-        query["mixsongid"] = id.clone();
-    }
-    match crate::modules::comment_send::handle_music_send(&query, ctx) {
-        Ok(resp) => {
-            let body = resp.body.to_json();
-            let comment = body.get("data").and_then(|v| standard_comment(v, 0));
-            json!({ "code": 0, "data": { "comment": comment } })
+    query["content"] = json!(content);
+    query["resource_type"] = json!(resource.resource_type);
+    query["mixsongid"] = json!(resource.mixsongid);
+    query["special_id"] = json!(resource.childrenid);
+    query["childrenid"] = json!(resource.childrenid);
+    query["name"] = json!(resource.name);
+    let result = if let Some(reply_id) = reply_id {
+        // Kugou floors are addressed by `tid` (top-level comment) and `pid`
+        // (the reply being answered). The v1 PostCommentRequest only exposes
+        // replyToCommentId; use an explicit parentCommentId when present so a
+        // reply inside a floor is not sent as a new top-level comment.
+        let (tid, pid) = match parent_id {
+            Some(parent) if parent != reply_id => (parent, reply_id),
+            _ => (reply_id, 0),
+        };
+        query["tid"] = json!(tid);
+        if pid > 0 {
+            query["pid"] = json!(pid);
+            query["is_t"] = json!(0);
         }
-        Err(_) => json!({ "code": 500, "msg": "Failed to create comment" }),
+        crate::modules::comment_send::handle_floor_send(&query, ctx)
+    } else {
+        match resource.resource_type {
+            "album" => crate::modules::comment_send::handle_album_send(&query, ctx),
+            "playlist" => crate::modules::comment_send::handle_playlist_send(&query, ctx),
+            _ => crate::modules::comment_send::handle_music_send(&query, ctx),
+        }
+    };
+    let body = match result {
+        Ok(resp) => resp.body.to_json(),
+        Err(resp) => resp.body.to_json(),
+    };
+    if let Some(message) = comment_body_error(&body) {
+        return json!({"code": 502, "msg": message});
     }
+    let comment = first_comment_object(&body).and_then(|item| standard_comment(item, 0));
+    json!({
+        "code": 0,
+        "status": 200,
+        "data": { "comment": comment }
+    })
+}
+
+fn handle_comment_delete(params: &Value, ctx: &Ctx) -> Value {
+    let comment_id = first_i64(
+        params,
+        &["/comment_id", "/commentId", "/cid"],
+    );
+    if comment_id <= 0 {
+        return json!({"code": 400, "msg": "Comment id must be positive"});
+    }
+    let resource = match resolve_comment_resource(params, ctx, true) {
+        Ok(resource) => resource,
+        Err(error) => return error,
+    };
+    let mut query = params.clone();
+    query["cid"] = json!(comment_id);
+    query["mixsongid"] = json!(resource.mixsongid);
+    query["special_id"] = json!(resource.childrenid);
+    query["childrenid"] = json!(resource.childrenid);
+    query["resource_type"] = json!(resource.resource_type);
+    let body = match crate::modules::comment_send::handle_music_del(&query, ctx) {
+        Ok(resp) => resp.body.to_json(),
+        Err(resp) => resp.body.to_json(),
+    };
+    if let Some(message) = comment_body_error(&body) {
+        return json!({"code": 502, "msg": message});
+    }
+    json!({"code": 0, "status": 200})
 }
 
 fn handle_fallback(method: &str, params: &Value, ctx: &Ctx) -> Value {
@@ -2443,7 +2799,48 @@ mod adapter_contract_tests {
         let response = handle_api("provider/info", &json!({}));
         assert_eq!(response["code"], 0);
         assert_eq!(response["data"]["version"], env!("CARGO_PKG_VERSION"));
-        assert_eq!(response["data"]["contract"], "standard");
+        assert_eq!(response["data"]["contract"], "kmp-sdk-v1");
+    }
+
+    #[test]
+    fn higher_quality_maps_to_192k_and_reports_higher() {
+        assert_eq!(comment_resource_type("music"), Some("song"));
+        assert_eq!(comment_resource_type("song"), Some("song"));
+        assert_eq!(comment_resource_type("album"), Some("album"));
+        assert_eq!(comment_resource_type("playlist"), Some("playlist"));
+        assert_eq!(comment_resource_type("mv"), None);
+
+        let response = song_url_response(
+            &json!({
+                "data": {
+                    "url": "https://example.invalid/audio.mp3",
+                    "quality": "192",
+                    "size": 123456
+                }
+            }),
+            "higher",
+            "192",
+        );
+        assert_eq!(response["code"], 0);
+        assert_eq!(response["data"]["quality"], "higher");
+        assert_eq!(response["data"]["size"], 123456);
+    }
+
+    #[test]
+    fn comment_pagination_uses_host_offset_and_floor_time_cursor() {
+        let query = with_page_params(&json!({"limit": 20, "offset": 40}));
+        assert_eq!(query["pagesize"], 20);
+        assert_eq!(query["page"], 3);
+
+        assert_eq!(comment_floor_page(&json!({"time": 0})), 1);
+        assert_eq!(comment_floor_page(&json!({"time": 2})), 2);
+        assert_eq!(comment_floor_page(&json!({"page": 4, "time": 2})), 4);
+
+        assert_eq!(effective_comment_sort_type("song", 1), 1);
+        assert_eq!(effective_comment_sort_type("song", 2), 2);
+        assert_eq!(effective_comment_sort_type("song", 3), 3);
+        assert_eq!(effective_comment_sort_type("album", 3), 1);
+        assert_eq!(effective_comment_sort_type("playlist", 2), 1);
     }
 
     #[test]
@@ -2735,8 +3132,13 @@ mod adapter_contract_tests {
             assert_eq!(handle_api(method, &json!({}))["code"], 401);
         }
         let manifest: Value = serde_json::from_str(include_str!("../packaging/manifest.json")).unwrap();
-        assert_eq!(manifest["apiMap"]["user/playlist/create"], "user/playlist/create");
-        assert_eq!(manifest["apiMap"]["user/playlist/collect"], "user/playlist/collect");
+        assert_eq!(manifest["type"], "native");
+        assert_eq!(manifest["contract"], "kmp-sdk-v1");
+        assert!(manifest["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|cap| cap == "playlists.create"));
     }
 
     #[test]

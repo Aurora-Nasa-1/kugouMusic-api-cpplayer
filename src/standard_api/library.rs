@@ -804,7 +804,8 @@ mod tests {
             ("playlist/delete", json!({"id": 198})),
             ("playlist/subscribe", json!({"id": 7235936, "t": "1"})),
         ] {
-            assert_eq!(manifest["apiMap"][method], method);
+            assert_eq!(manifest["type"], "native", "{method}");
+            assert_eq!(manifest["contract"], "kmp-sdk-v1", "{method}");
             assert_eq!(handle_api(method, &params)["code"], 401, "{method}");
         }
         for (method, params) in [

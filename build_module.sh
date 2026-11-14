@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# 构建 CPPlayer 酷狗音源模块 (Standard v3 JNI)。
+# 构建 CPPlayer 酷狗音源模块 (kmp-sdk-v1 原生模块)。
 #
 # 用法：
 #   ./build_module.sh                 # 按当前 OS 构建桌面端（linux / macos / windows）

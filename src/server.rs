@@ -500,8 +500,8 @@ fn handle_request(mut request: Request, _data_dir: &str) -> Result<(), String> {
     };
     let body_is_buffer = ct.contains("application/octet-stream");
 
-    // Desktop workers and the host's HTTP fallback use /api/<method> with the
-    // same flat parameters and Standard response contract as nativeCallApi.
+    // Legacy HTTP debugging uses /api/<method> with the same flat parameters
+    // and JSON response shape as the internal standard_api compatibility layer.
     if let Some(api_method) = path.strip_prefix("/api/") {
         let mut params = parse_query(&query_part);
         if let Some(body) = &body_value {

@@ -1,9 +1,8 @@
-//! kugou_music_rs — CPPlayer-KMP 酷狗音源模块 (Standard v3 JNI Provider)。
+//! kugou_music_rs — CPPlayer-KMP 酷狗音源模块 (kmp-sdk-v1 原生 Provider)。
 //!
 //! 支持双通道调用：
-//!  1. JNI 模式：实现 CPPlayer-KMP JniProvider 规范，由宿主直接在进程内通过 JNI 调用 nativeCallApi，
-//!     零 HTTP 回环开销，数据结构符合 Standard v3 (扁平 tracks、url、lyric 模型)。
-//!  2. HTTP/FFI 模式：保留原有的 tiny_http 本地服务与 C FFI，支持独立运行和调试。
+//!  1. JNI / C ABI：宿主通过 `NativeSession` 的类型化 Wire 协议直接调用。
+//!  2. 旧 HTTP/JSON 适配层：仅供调试与历史兼容，不是新的模块契约。
 
 pub mod cache;
 pub mod config;

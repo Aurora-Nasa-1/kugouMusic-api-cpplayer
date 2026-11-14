@@ -248,11 +248,20 @@ pub fn quality_from_bitrate(data: &Value) -> &'static str {
         .unwrap_or("")
         .to_ascii_lowercase();
     if matches!(ext.as_str(), "ogg" | "mp3" | "aac" | "m4a" | "wma") {
-        return if kbps <= 200.0 { "128" } else { "320" };
+        return if kbps <= 160.0 {
+            "128"
+        } else if kbps <= 240.0 {
+            "192"
+        } else {
+            "320"
+        };
     }
 
-    if kbps <= 200.0 {
+    if kbps <= 160.0 {
         return "128";
+    }
+    if kbps <= 240.0 {
+        return "192";
     }
     if kbps <= 500.0 {
         return "320";

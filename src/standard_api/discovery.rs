@@ -74,12 +74,26 @@ pub(super) fn songs(body: &Value, params: &Value) -> Vec<Value> {
 pub(super) fn playlists(params: &Value, ctx: &Ctx, selected: bool) -> Value {
     let mut query = query(params);
     query["is_selected"] = json!(i64::from(selected));
-    if first_string(params, &["/order"]) == "new" {
-        query["sort"] = json!(2);
+    match playlist_order_sort(params) {
+        Ok(Some(sort)) => query["sort"] = json!(sort),
+        Ok(None) => {}
+        Err(error) => return error,
     }
     match read(crate::modules::top::handle_playlist(&query, ctx)) {
         Ok(body) => playlist_response(&body, params),
         Err(error) => error,
+    }
+}
+
+fn playlist_order_sort(params: &Value) -> Result<Option<i64>, Value> {
+    let order = first_string(params, &["/order"]).trim().to_ascii_lowercase();
+    match order.as_str() {
+        "" | "hot" => Ok(None),
+        "new" => Ok(Some(2)),
+        _ => Err(json!({
+            "code": 400,
+            "msg": format!("Unsupported playlist order: {order}")
+        })),
     }
 }
 
@@ -584,7 +598,7 @@ mod tests {
             "simi_song",
             "playmode/intelligence/list",
         ] {
-            assert_eq!(manifest["apiMap"][method], method, "{method}");
+            assert_eq!(manifest["contract"], "kmp-sdk-v1", "{method}");
         }
     }
 
@@ -661,6 +675,15 @@ mod tests {
             album_response(&body, &json!({"area": "unknown"}))["code"],
             400
         );
+    }
+
+    #[test]
+    fn playlist_order_is_mapped_or_rejected_explicitly() {
+        assert_eq!(playlist_order_sort(&json!({})).unwrap(), None);
+        assert_eq!(playlist_order_sort(&json!({"order": "hot"})).unwrap(), None);
+        assert_eq!(playlist_order_sort(&json!({"order": "NEW"})).unwrap(), Some(2));
+        let error = playlist_order_sort(&json!({"order": "unknown"})).unwrap_err();
+        assert_eq!(error["code"], 400);
     }
 
     #[test]

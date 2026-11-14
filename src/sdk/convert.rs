@@ -34,6 +34,40 @@ pub fn first_i64(root: &Value, paths: &[&str]) -> i64 {
     0
 }
 
+fn explicit_i64(root: &Value, paths: &[&str]) -> Option<i64> {
+    paths
+        .iter()
+        .find_map(|path| root.pointer(path).and_then(value_to_i64))
+}
+
+fn explicit_bool(root: &Value, paths: &[&str]) -> Option<bool> {
+    paths.iter().find_map(|path| {
+        root.pointer(path).and_then(|value| match value {
+            Value::Bool(value) => Some(*value),
+            Value::Number(value) => value.as_i64().map(|value| value != 0),
+            Value::String(value) => match value.trim().to_ascii_lowercase().as_str() {
+                "true" | "1" => Some(true),
+                "false" | "0" => Some(false),
+                _ => None,
+            },
+            _ => None,
+        })
+    })
+}
+
+fn truncate_utf8(value: &str, max_bytes: usize) -> &str {
+    if value.len() <= max_bytes {
+        return value;
+    }
+    let end = value
+        .char_indices()
+        .map(|(index, _)| index)
+        .take_while(|index| *index <= max_bytes)
+        .last()
+        .unwrap_or(0);
+    &value[..end]
+}
+
 /// 宿主严苛校验要求：HTTP URL 必须以 http:// 或 https:// 开头，不含控制字符，长度不超过 16384
 pub fn sanitize_http_url(s: &str) -> Option<String> {
     let trimmed = s.trim();
@@ -59,7 +93,10 @@ pub fn sanitize_http_url(s: &str) -> Option<String> {
 
 pub fn sanitize_id(s: &str) -> Option<String> {
     let trimmed = s.trim();
-    if trimmed.is_empty() || trimmed.len() > 1024 || trimmed.chars().any(|c| (c as u32) < 32 || (c as u32) == 127) {
+    if trimmed.is_empty()
+        || trimmed.chars().count() > 1024
+        || trimmed.chars().any(|c| (c as u32) < 32 || c as u32 == 127)
+    {
         None
     } else {
         Some(trimmed.to_string())
@@ -69,12 +106,7 @@ pub fn sanitize_id(s: &str) -> Option<String> {
 pub fn sanitize_title(s: &str, fallback: Option<&str>) -> Option<String> {
     let trimmed = s.trim();
     if !trimmed.is_empty() {
-        let truncated = if trimmed.len() > 4096 {
-            &trimmed[..4096]
-        } else {
-            trimmed
-        };
-        Some(truncated.to_string())
+        Some(truncate_utf8(trimmed, 4096).to_string())
     } else {
         fallback.map(|fb| fb.to_string())
     }
@@ -99,24 +131,22 @@ pub fn to_track(val: &Value) -> Option<Track> {
             .filter(|s| !s.is_empty())
             .map(|s| Artist {
                 id: None,
-                name: if s.len() > 4096 { s[..4096].to_string() } else { s.to_string() },
+                name: truncate_utf8(s, 4096).to_string(),
             })
             .collect()
     };
 
-    if artists.is_empty() {
-        artists.push(Artist {
-            id: None,
-            name: "未知歌手".to_string(),
-        });
-    }
     if artists.len() > 64 {
         artists.truncate(64);
     }
 
-    let dur_sec = first_i64(val, &["/duration"]);
-    let mut duration_ms = if dur_sec > 0 {
-        dur_sec * 1000
+    let raw_duration = explicit_i64(val, &["/duration"]);
+    let mut duration_ms = if let Some(duration) = raw_duration {
+        if duration >= 10_000 {
+            duration
+        } else {
+            duration.saturating_mul(1000)
+        }
     } else {
         first_i64(val, &["/timelen", "/durationMs"])
     };
@@ -171,17 +201,15 @@ pub fn to_track_page(val: &Value) -> TrackPage {
         }
     }
 
-    let total = first_i64(root, &["/total", "/songCount", "/count"]);
-    let total_opt = if total > 0 {
-        Some(total.max(items.len() as i64))
-    } else {
-        None
-    };
-    let has_more = root.get("hasMore").and_then(Value::as_bool).or(Some(items.len() >= 20));
+    let total = explicit_i64(root, &["/songCount", "/total", "/count"]);
+    let has_more = explicit_bool(
+        root,
+        &["/hasMore", "/has_more", "/hasNext", "/has_next", "/more"],
+    );
 
     TrackPage {
         items,
-        total: total_opt,
+        total,
         hasMore: has_more,
     }
 }
@@ -190,11 +218,6 @@ pub fn clamp_track_page(mut page: TrackPage, limit: i32) -> TrackPage {
     if limit > 0 && page.items.len() > limit as usize {
         page.items.truncate(limit as usize);
     }
-    if let Some(total) = page.total {
-        if total < page.items.len() as i64 {
-            page.total = Some(page.items.len() as i64);
-        }
-    }
     page
 }
 
@@ -202,16 +225,15 @@ pub fn to_playlist(val: &Value) -> Option<Playlist> {
     let raw_id = first_string(val, &["/id", "/specialid", "/listid", "/global_collection_id"]);
     let id = sanitize_id(&raw_id)?;
     let raw_title = first_string(val, &["/title", "/name", "/specialname", "/listname"]);
-    let title = sanitize_title(&raw_title, Some("歌单"))?;
+    let title = sanitize_title(&raw_title, None)?;
 
     let cover_url = {
         let s = first_string(val, &["/coverUrl", "/coverImgUrl", "/picUrl", "/pic", "/img", "/flexible_cover"]);
         sanitize_http_url(&s)
     };
-    let track_count = {
-        let c = first_i64(val, &["/trackCount", "/total", "/count", "/songcount"]);
-        if c >= 0 { Some(c as i32) } else { None }
-    };
+    let track_count = explicit_i64(val, &["/trackCount", "/total", "/count", "/songcount"])
+        .and_then(|count| i32::try_from(count).ok())
+        .filter(|count| *count >= 0);
     let creator_id = {
         let s = first_string(val, &["/creator/userId", "/userid", "/uid"]);
         sanitize_id(&s)
@@ -226,7 +248,7 @@ pub fn to_playlist(val: &Value) -> Option<Playlist> {
             None
         } else {
             let trimmed = s.trim();
-            Some(if trimmed.len() > 65536 { trimmed[..65536].to_string() } else { trimmed.to_string() })
+            Some(truncate_utf8(trimmed, 65536).to_string())
         }
     };
 
@@ -266,17 +288,15 @@ pub fn to_playlist_page(val: &Value) -> PlaylistPage {
         }
     }
 
-    let total = first_i64(root, &["/total", "/count"]);
-    let total_opt = if total > 0 {
-        Some(total.max(items.len() as i64))
-    } else {
-        None
-    };
-    let has_more = root.get("hasMore").and_then(Value::as_bool).or(Some(items.len() >= 20));
+    let total = explicit_i64(root, &["/total", "/count"]);
+    let has_more = explicit_bool(
+        root,
+        &["/hasMore", "/has_more", "/hasNext", "/has_next", "/more"],
+    );
 
     PlaylistPage {
         items,
-        total: total_opt,
+        total,
         hasMore: has_more,
     }
 }
@@ -285,11 +305,6 @@ pub fn clamp_playlist_page(mut page: PlaylistPage, limit: i32) -> PlaylistPage {
     if limit > 0 && page.items.len() > limit as usize {
         page.items.truncate(limit as usize);
     }
-    if let Some(total) = page.total {
-        if total < page.items.len() as i64 {
-            page.total = Some(page.items.len() as i64);
-        }
-    }
     page
 }
 
@@ -297,16 +312,15 @@ pub fn to_album(val: &Value) -> Option<Album> {
     let raw_id = first_string(val, &["/id", "/album_id", "/albumid"]);
     let id = sanitize_id(&raw_id)?;
     let raw_title = first_string(val, &["/name", "/title", "/album_name", "/albumname"]);
-    let title = sanitize_title(&raw_title, Some("专辑"))?;
+    let title = sanitize_title(&raw_title, None)?;
 
     let cover_url = {
         let s = first_string(val, &["/coverUrl", "/pic", "/img", "/cover", "/sizable_cover"]);
         sanitize_http_url(&s)
     };
-    let track_count = {
-        let c = first_i64(val, &["/trackCount", "/song_count", "/total"]);
-        if c >= 0 { Some(c as i32) } else { None }
-    };
+    let track_count = explicit_i64(val, &["/trackCount", "/song_count", "/total"])
+        .and_then(|count| i32::try_from(count).ok())
+        .filter(|count| *count >= 0);
     let company = {
         let s = first_string(val, &["/company", "/publish_company"]);
         if s.trim().is_empty() { None } else { Some(s.trim().to_string()) }
@@ -317,9 +331,12 @@ pub fn to_album(val: &Value) -> Option<Album> {
     };
     let artist_str = first_string(val, &["/artist", "/author_name", "/singername"]);
     let artists = if artist_str.is_empty() {
-        vec![Artist { id: None, name: "未知歌手".to_string() }]
+        Vec::new()
     } else {
-        vec![Artist { id: None, name: artist_str }]
+        vec![Artist {
+            id: None,
+            name: truncate_utf8(&artist_str, 4096).to_string(),
+        }]
     };
 
     Some(Album {
@@ -358,17 +375,15 @@ pub fn to_album_page(val: &Value) -> AlbumPage {
         }
     }
 
-    let total = first_i64(root, &["/total", "/count"]);
-    let total_opt = if total > 0 {
-        Some(total.max(items.len() as i64))
-    } else {
-        None
-    };
-    let has_more = root.get("hasMore").and_then(Value::as_bool).or(Some(items.len() >= 20));
+    let total = explicit_i64(root, &["/total", "/count"]);
+    let has_more = explicit_bool(
+        root,
+        &["/hasMore", "/has_more", "/hasNext", "/has_next", "/more"],
+    );
 
     AlbumPage {
         items,
-        total: total_opt,
+        total,
         hasMore: has_more,
     }
 }
@@ -377,11 +392,6 @@ pub fn clamp_album_page(mut page: AlbumPage, limit: i32) -> AlbumPage {
     if limit > 0 && page.items.len() > limit as usize {
         page.items.truncate(limit as usize);
     }
-    if let Some(total) = page.total {
-        if total < page.items.len() as i64 {
-            page.total = Some(page.items.len() as i64);
-        }
-    }
     page
 }
 
@@ -389,7 +399,7 @@ pub fn to_artist(val: &Value) -> Option<CatalogArtist> {
     let raw_id = first_string(val, &["/id", "/author_id", "/singerid", "/artist_id"]);
     let id = sanitize_id(&raw_id)?;
     let raw_name = first_string(val, &["/name", "/title", "/author_name", "/singername"]);
-    let name = sanitize_title(&raw_name, Some("歌手"))?;
+    let name = sanitize_title(&raw_name, None)?;
 
     let avatar_url = {
         let s = first_string(val, &["/avatarUrl", "/avatar", "/pic", "/img", "/cover"]);
@@ -399,14 +409,15 @@ pub fn to_artist(val: &Value) -> Option<CatalogArtist> {
         let s = first_string(val, &["/description", "/intro", "/profile"]);
         if s.trim().is_empty() { None } else { Some(s.trim().to_string()) }
     };
-    let album_count = {
-        let c = first_i64(val, &["/albumCount", "/album_count", "/albumcount"]);
-        if c >= 0 { Some(c as i32) } else { None }
-    };
-    let track_count = {
-        let c = first_i64(val, &["/trackCount", "/songCount", "/song_count", "/songcount"]);
-        if c >= 0 { Some(c as i32) } else { None }
-    };
+    let album_count = explicit_i64(val, &["/albumCount", "/album_count", "/albumcount"])
+        .and_then(|count| i32::try_from(count).ok())
+        .filter(|count| *count >= 0);
+    let track_count = explicit_i64(
+        val,
+        &["/trackCount", "/songCount", "/song_count", "/songcount"],
+    )
+    .and_then(|count| i32::try_from(count).ok())
+    .filter(|count| *count >= 0);
 
     Some(CatalogArtist {
         id,
@@ -444,17 +455,15 @@ pub fn to_artist_page(val: &Value) -> ArtistPage {
         }
     }
 
-    let total = first_i64(root, &["/total", "/count"]);
-    let total_opt = if total > 0 {
-        Some(total.max(items.len() as i64))
-    } else {
-        None
-    };
-    let has_more = root.get("hasMore").and_then(Value::as_bool).or(Some(items.len() >= 20));
+    let total = explicit_i64(root, &["/total", "/count"]);
+    let has_more = explicit_bool(
+        root,
+        &["/hasMore", "/has_more", "/hasNext", "/has_next", "/more"],
+    );
 
     ArtistPage {
         items,
-        total: total_opt,
+        total,
         hasMore: has_more,
     }
 }
@@ -462,11 +471,6 @@ pub fn to_artist_page(val: &Value) -> ArtistPage {
 pub fn clamp_artist_page(mut page: ArtistPage, limit: i32) -> ArtistPage {
     if limit > 0 && page.items.len() > limit as usize {
         page.items.truncate(limit as usize);
-    }
-    if let Some(total) = page.total {
-        if total < page.items.len() as i64 {
-            page.total = Some(page.items.len() as i64);
-        }
     }
     page
 }
@@ -520,22 +524,83 @@ pub fn to_ranking(val: &Value) -> Option<Ranking> {
 }
 
 pub fn to_comment_item(val: &Value) -> Option<CommentItem> {
-    let id = first_i64(val, &["/id", "/comment_id", "/childrenid"]);
-    let content = first_string(val, &["/content", "/msg"]);
-    let user = first_string(val, &["/user", "/user_name", "/nickname", "/username"]);
+    let id = first_i64(
+        val,
+        &["/commentId", "/comment_id", "/cid", "/id", "/childrenid"],
+    );
+    if id <= 0 {
+        return None;
+    }
+    let content = first_string(val, &["/content", "/comment", "/text", "/msg"]);
+    let user = first_string(
+        val,
+        &[
+            "/user/nickname",
+            "/user/name",
+            "/user",
+            "/user_name",
+            "/nickname",
+            "/username",
+        ],
+    );
     let avatar = {
-        let s = first_string(val, &["/avatar", "/user_pic", "/userpic"]);
+        let s = first_string(
+            val,
+            &[
+                "/user/avatarUrl",
+                "/user/avatar",
+                "/avatarUrl",
+                "/avatar",
+                "/user_pic",
+                "/userpic",
+            ],
+        );
         sanitize_http_url(&s).unwrap_or_default()
     };
-    let time = first_string(val, &["/time", "/addtime"]);
-    let liked_count = first_i64(val, &["/likedCount", "/like_count", "/likenum"]).max(0) as i32;
-    let liked = val.get("liked").and_then(Value::as_bool).unwrap_or(false);
-    let reply_count = first_i64(val, &["/replyCount", "/reply_num"]).max(0) as i32;
-    let user_id = first_i64(val, &["/userId", "/user_id", "/uid"]);
-    let time_ms = first_i64(val, &["/timeMs", "/timestamp"]);
+    let time = {
+        let text = first_string(val, &["/timeStr", "/time_string", "/addtime_str"]);
+        if text.is_empty() {
+            first_string(val, &["/time", "/addtime", "/create_time"])
+        } else {
+            text
+        }
+    };
+    let liked_count = first_i64(
+        val,
+        &["/likedCount", "/like_count", "/likenum", "/praise_count"],
+    )
+    .max(0) as i32;
+    let liked = val
+        .get("liked")
+        .or_else(|| val.get("is_like"))
+        .and_then(|value| match value {
+            Value::Bool(value) => Some(*value),
+            Value::Number(value) => value.as_i64().map(|value| value == 1),
+            _ => None,
+        })
+        .unwrap_or(false);
+    let reply_count = first_i64(
+        val,
+        &["/replyCount", "/reply_count", "/reply_num", "/replynum"],
+    )
+    .max(0) as i32;
+    let user_id = first_i64(
+        val,
+        &["/user/userId", "/user/userid", "/userId", "/user_id", "/uid"],
+    );
+    let time_ms = first_i64(val, &["/timeMs", "/timestamp", "/time"]);
+    let parent_comment_id = first_i64(
+        val,
+        &[
+            "/parentCommentId",
+            "/parent_comment_id",
+            "/parent_id",
+            "/pid",
+        ],
+    );
 
     Some(CommentItem {
-        id: if id > 0 { id } else { 1 },
+        id,
         content,
         user,
         avatar,
@@ -546,9 +611,17 @@ pub fn to_comment_item(val: &Value) -> Option<CommentItem> {
         beReplied: Vec::new(),
         userId: user_id,
         timeMs: time_ms,
-        parentCommentId: 0,
+        parentCommentId: parent_comment_id,
         ipLocation: first_string(val, &["/ipLocation", "/ip_location", "/location"]),
-        isHot: val.get("isHot").and_then(Value::as_bool).unwrap_or(false),
+        isHot: val
+            .get("isHot")
+            .or_else(|| val.get("is_hot"))
+            .and_then(|value| match value {
+                Value::Bool(value) => Some(*value),
+                Value::Number(value) => value.as_i64().map(|value| value == 1),
+                _ => None,
+            })
+            .unwrap_or(false),
         topReplies: Vec::new(),
     })
 }
