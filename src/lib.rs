@@ -17,6 +17,7 @@ pub mod server;
 pub mod simulate;
 pub mod util;
 pub mod standard_api;
+pub mod sdk;
 
 #[cfg(feature = "jni")]
 pub mod jni;

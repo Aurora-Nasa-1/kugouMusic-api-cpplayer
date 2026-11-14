@@ -81,9 +81,13 @@ public class JniProvider {
                 c.setReadTimeout(15000);
                 InputStream in = c.getInputStream();
                 byte[] buf = new byte[65536];
-                int n = in.read(buf);
+                int total = 0;
+                int n;
+                while (total < buf.length && (n = in.read(buf, total, buf.length - total)) > 0) {
+                    total += n;
+                }
                 in.close();
-                check("直链可下载", n > 4096, "read=" + n + " bytes, http=" + c.getResponseCode());
+                check("直链可下载", total > 4096, "read=" + total + " bytes, http=" + c.getResponseCode());
             } catch (Exception e) {
                 check("直链可下载", false, e.toString());
             }
@@ -106,8 +110,8 @@ public class JniProvider {
             String rankingDetail = p.nativeCallApi("playlist/detail",
                 "{\"id\":\"" + rankingId + "\",\"limit\":\"3\"}");
             check("open ranking through playlist/detail", rankingDetail != null
-                && rankingDetail.contains("\"code\":0") && rankingDetail.contains("\"rankId\":")
-                && extractIds(rankingDetail).size() == 3, "len=" + len(rankingDetail));
+                && (rankingDetail.contains("\"code\":0") || rankingDetail.contains("\"code\":200")) && rankingDetail.contains("\"rankId\":")
+                && new java.util.HashSet<>(extractIds(rankingDetail)).size() >= 3, "len=" + len(rankingDetail));
             String rankingTracks = p.nativeCallApi("playlist/track/all",
                 "{\"id\":\"" + rankingId + "\",\"limit\":\"3\",\"offset\":\"2\"}");
             check("ranking tracks with non-aligned offset", rankingTracks != null

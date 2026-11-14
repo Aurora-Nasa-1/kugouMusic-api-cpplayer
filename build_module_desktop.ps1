@@ -148,4 +148,6 @@ if ($python) {
     Compress-Archive -Path "$stagingDir\*" -DestinationPath $outZip -Force
 }
 
-Write-Host "`n[SUCCESS] Windows module packaged successfully at target/kugou-music-rs-windows.zip" -ForegroundColor Green
+$standardProviderZip = Join-Path $Root "target\kugou-provider.zip"
+Copy-Item -Path $outZip -Destination $standardProviderZip -Force
+Write-Host "`n[SUCCESS] Windows module packaged successfully at target/kugou-music-rs-windows.zip (and target/kugou-provider.zip)" -ForegroundColor Green

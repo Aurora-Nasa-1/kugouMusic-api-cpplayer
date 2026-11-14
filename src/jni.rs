@@ -16,8 +16,8 @@
 //! 1. release profile 必须是 `panic = "unwind"`（见 Cargo.toml）；
 //! 2. 每个导出函数都套 `catch_unwind`，把 panic 收敛成本次调用的 JSON 错误。
 
-use jni::objects::{JClass, JObject, JString, JValue};
-use jni::sys::{jint, jstring};
+use jni::objects::{JByteArray, JClass, JObject, JString, JValue};
+use jni::sys::{jbyteArray, jint, jlong, jstring};
 use jni::JNIEnv;
 use serde_json::Value;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -223,3 +223,221 @@ export_jni!(
     Java_cp_player_provider_JniProvider_nativeCallApi,
     Java_cp_player_provider_JniProvider_analyzeAudioFile
 );
+
+// ---------------------------------------------------------------------------
+// Typed SDK Session JNI Exports (kmp-sdk-v1 Wire IPC)
+// ---------------------------------------------------------------------------
+
+unsafe fn session_create_impl(
+    env: &mut JNIEnv,
+    provider_id: JString,
+    account_id: JString,
+    credential: JString,
+    settings: JString,
+) -> jlong {
+    ensure_jvm_init(env);
+
+    let provider_id: String = if provider_id.is_null() {
+        "kugou".to_string()
+    } else {
+        env.get_string(&provider_id).map(|s| s.into()).unwrap_or_else(|_| "kugou".to_string())
+    };
+
+    let account_id: Option<String> = if account_id.is_null() {
+        None
+    } else {
+        env.get_string(&account_id).ok().map(|s| s.into())
+    };
+
+    let credential: Option<String> = if credential.is_null() {
+        None
+    } else {
+        env.get_string(&credential).ok().map(|s| s.into())
+    };
+
+    let settings: Option<String> = if settings.is_null() {
+        None
+    } else {
+        env.get_string(&settings).ok().map(|s| s.into())
+    };
+
+    let session = Box::new(crate::sdk::session::KugouSession::new(
+        provider_id,
+        account_id,
+        credential,
+        settings,
+    ));
+    Box::into_raw(session) as jlong
+}
+
+unsafe fn session_invoke_impl(
+    env: &mut JNIEnv,
+    handle: jlong,
+    operation: jint,
+    request_bytes: JByteArray,
+) -> jbyteArray {
+    if handle == 0 {
+        return std::ptr::null_mut();
+    }
+    let session = &*(handle as *const crate::sdk::session::KugouSession);
+    let req_vec = match env.convert_byte_array(&request_bytes) {
+        Ok(v) => v,
+        Err(_) => Vec::new(),
+    };
+
+    let resp_vec = match catch_unwind(AssertUnwindSafe(|| {
+        session.dispatch(operation as i32, &req_vec)
+    })) {
+        Ok(bytes) => bytes,
+        Err(panic_payload) => {
+            let msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                (*s).to_string()
+            } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "Unknown native panic".to_string()
+            };
+            let mut writer = crate::sdk::wire::WireWriter::new();
+            writer.write_byte(1); // 1 = failure
+            let failure = crate::sdk::wire_models::Failure {
+                category: "Internal".to_string(),
+                message: format!("Native panic in dispatch: {}", msg),
+            };
+            failure.write(&mut writer);
+            writer.finish()
+        }
+    };
+
+    match env.byte_array_from_slice(&resp_vec) {
+        Ok(jarr) => jarr.into_raw(),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+unsafe fn session_cancel_impl(handle: jlong) {
+    if handle != 0 {
+        let session = &*(handle as *const crate::sdk::session::KugouSession);
+        session.cancel();
+    }
+}
+
+unsafe fn session_close_impl(handle: jlong) {
+    if handle != 0 {
+        let _ = Box::from_raw(handle as *mut crate::sdk::session::KugouSession);
+    }
+}
+
+macro_rules! export_session_jni {
+    ($create:ident, $invoke:ident, $cancel:ident, $close:ident) => {
+        #[no_mangle]
+        #[allow(unsafe_code)]
+        pub unsafe extern "system" fn $create(
+            mut env: jni::JNIEnv,
+            _class: jni::objects::JClass,
+            provider_id: jni::objects::JString,
+            account_id: jni::objects::JString,
+            credential: jni::objects::JString,
+            settings: jni::objects::JString,
+        ) -> jni::sys::jlong {
+            match catch_unwind(AssertUnwindSafe(|| {
+                session_create_impl(&mut env, provider_id, account_id, credential, settings)
+            })) {
+                Ok(h) => h,
+                Err(_) => 0,
+            }
+        }
+
+        #[no_mangle]
+        #[allow(unsafe_code)]
+        pub unsafe extern "system" fn $invoke(
+            mut env: jni::JNIEnv,
+            _class: jni::objects::JClass,
+            handle: jni::sys::jlong,
+            operation: jni::sys::jint,
+            request_bytes: jni::objects::JByteArray,
+        ) -> jni::sys::jbyteArray {
+            session_invoke_impl(&mut env, handle, operation, request_bytes)
+        }
+
+        #[no_mangle]
+        #[allow(unsafe_code)]
+        pub unsafe extern "system" fn $cancel(
+            _env: jni::JNIEnv,
+            _class: jni::objects::JClass,
+            handle: jni::sys::jlong,
+        ) {
+            let _ = catch_unwind(AssertUnwindSafe(|| {
+                session_cancel_impl(handle);
+            }));
+        }
+
+        #[no_mangle]
+        #[allow(unsafe_code)]
+        pub unsafe extern "system" fn $close(
+            _env: jni::JNIEnv,
+            _class: jni::objects::JClass,
+            handle: jni::sys::jlong,
+        ) {
+            let _ = catch_unwind(AssertUnwindSafe(|| {
+                session_close_impl(handle);
+            }));
+        }
+    };
+}
+
+// 1. Primary symbol: cp.player.core.provider.kugou.KugouJniSession
+export_session_jni!(
+    Java_cp_player_core_provider_kugou_KugouJniSession_createNative,
+    Java_cp_player_core_provider_kugou_KugouJniSession_invokeNative,
+    Java_cp_player_core_provider_kugou_KugouJniSession_cancelNative,
+    Java_cp_player_core_provider_kugou_KugouJniSession_closeNative
+);
+
+// 2. Alias: cp.player.sdk.jni.KugouJniSession
+export_session_jni!(
+    Java_cp_player_sdk_jni_KugouJniSession_createNative,
+    Java_cp_player_sdk_jni_KugouJniSession_invokeNative,
+    Java_cp_player_sdk_jni_KugouJniSession_cancelNative,
+    Java_cp_player_sdk_jni_KugouJniSession_closeNative
+);
+
+// 3. Alias: cp.player.kugou.KugouJniSession
+export_session_jni!(
+    Java_cp_player_kugou_KugouJniSession_createNative,
+    Java_cp_player_kugou_KugouJniSession_invokeNative,
+    Java_cp_player_kugou_KugouJniSession_cancelNative,
+    Java_cp_player_kugou_KugouJniSession_closeNative
+);
+
+// 4. Alias: cp.player.kugou.KugouNativeSession
+export_session_jni!(
+    Java_cp_player_kugou_KugouNativeSession_createNative,
+    Java_cp_player_kugou_KugouNativeSession_invokeNative,
+    Java_cp_player_kugou_KugouNativeSession_cancelNative,
+    Java_cp_player_kugou_KugouNativeSession_closeNative
+);
+
+// 5. Generic alias: cp.player.sdk.jni.NativeSession
+export_session_jni!(
+    Java_cp_player_sdk_jni_NativeSession_createNative,
+    Java_cp_player_sdk_jni_NativeSession_invokeNative,
+    Java_cp_player_sdk_jni_NativeSession_cancelNative,
+    Java_cp_player_sdk_jni_NativeSession_closeNative
+);
+
+// 6. Generic alias: cp.player.core.provider.typed.NativeSession
+export_session_jni!(
+    Java_cp_player_core_provider_typed_NativeSession_createNative,
+    Java_cp_player_core_provider_typed_NativeSession_invokeNative,
+    Java_cp_player_core_provider_typed_NativeSession_cancelNative,
+    Java_cp_player_core_provider_typed_NativeSession_closeNative
+);
+
+// 7. Smoke test class: cp.player.core.provider.kugou.KugouSessionSmoke
+export_session_jni!(
+    Java_cp_player_core_provider_kugou_KugouSessionSmoke_createNative,
+    Java_cp_player_core_provider_kugou_KugouSessionSmoke_invokeNative,
+    Java_cp_player_core_provider_kugou_KugouSessionSmoke_cancelNative,
+    Java_cp_player_core_provider_kugou_KugouSessionSmoke_closeNative
+);
+

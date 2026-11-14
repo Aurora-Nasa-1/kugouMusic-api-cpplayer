@@ -35,7 +35,7 @@ import re
 import sys
 import zipfile
 
-DEFAULT_ID = "kugou-music-rs"
+DEFAULT_ID = "kugou"
 DEFAULT_NAME = "酷狗音乐"
 
 EXPECTED_SUFFIX = {
@@ -248,7 +248,9 @@ def main() -> int:
     manifest["type"] = "jni"
     manifest["entryPoint"] = entry_point
     manifest["supportedAbis"] = abis
-    manifest.setdefault("contract", "standard")
+    manifest.setdefault("contract", "kmp-sdk-v1")
+    manifest.pop("apiMap", None)
+    manifest.pop("nativeFactoryClass", None)
 
     manifest_path = os.path.join(staging, "manifest.json")
     write_manifest(manifest_path, manifest)
