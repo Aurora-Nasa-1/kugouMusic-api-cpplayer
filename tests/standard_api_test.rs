@@ -173,3 +173,103 @@ fn test_like_and_playlist_tracks_validation() {
     );
     assert_eq!(invalid_op["code"], 400);
 }
+
+#[test]
+fn test_sdk_capabilities_and_parsing_fixes() {
+    use kugou_music_rs::sdk::session::*;
+    use kugou_music_rs::sdk::protocol::*;
+    use kugou_music_rs::sdk::wire::*;
+    use kugou_music_rs::sdk::wire_models::*;
+    use kugou_music_rs::sdk::convert;
+
+    let session = KugouSession::new("kugou".into(), None, None, None);
+    let resp_bytes = session.dispatch(OP_CAPABILITIES, &[]);
+    assert_eq!(resp_bytes[0], 0);
+    let mut r = WireReader::new(&resp_bytes[1..]);
+    let caps = Capabilities::read(&mut r).expect("Capabilities wire decode failed");
+
+    let required = [
+        "recommendations.personalFm",
+        "recommendations.similarSongs",
+        "recommendations.intelligenceSongs",
+        "discovery.searchSuggestions",
+        "auth.actions",
+        "tracks.available",
+        "media.qualities",
+        "recommendations.songs",
+        "recommendations.playlists",
+    ];
+    for cap in required {
+        assert!(caps.supported.contains(&cap.to_string()), "Missing capability: {}", cap);
+    }
+
+    // 每日推荐格式
+    let daily_res = json!({
+        "code": 0,
+        "data": {
+            "dailySongs": [
+                {
+                    "id": "DAILY_HASH_1",
+                    "title": "Daily Song 1",
+                    "artist": "Daily Artist",
+                    "duration": 200,
+                    "album": "Daily Album",
+                    "coverUrl": "https://img.kugou.com/cover/1.jpg"
+                }
+            ]
+        }
+    });
+    let page = convert::to_track_page(&daily_res);
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].id, "DAILY_HASH_1");
+    assert_eq!(page.items[0].title, "Daily Song 1");
+
+    // 私人 FM 数组格式
+    let fm_res = json!({
+        "code": 0,
+        "data": [
+            {
+                "hash": "FM_HASH_1",
+                "SongName": "FM Song 1",
+                "SingerName": "FM Artist",
+                "timelen": 180000,
+                "cover": "//img.kugou.com/fm/1.jpg"
+            }
+        ]
+    });
+    let fm_page = convert::to_track_page(&fm_res);
+    assert_eq!(fm_page.items.len(), 1);
+    assert_eq!(fm_page.items[0].id, "FM_HASH_1");
+    assert_eq!(fm_page.items[0].title, "FM Song 1");
+    assert_eq!(fm_page.items[0].coverUrl, Some("https://img.kugou.com/fm/1.jpg".to_string()));
+
+    // Clamping 截断
+    let clamped = convert::clamp_track_page(fm_page, 0);
+    assert_eq!(clamped.items.len(), 1);
+
+    // Auth Actions: qr.create & logout
+    let mut writer = WireWriter::new();
+    AuthActionRequest {
+        action: "qr.create".into(),
+        key: Some("sample-key".into()),
+        ..Default::default()
+    }.write(&mut writer);
+    let resp = session.dispatch(OP_AUTHENTICATE, &writer.finish());
+    assert_eq!(resp[0], 0);
+    let mut r = WireReader::new(&resp[1..]);
+    let res = AuthActionResult::read(&mut r).unwrap();
+    assert!(res.success);
+    assert!(res.imageBase64.is_some(), "Expected imageBase64 for qr.create");
+
+    let mut writer = WireWriter::new();
+    AuthActionRequest {
+        action: "logout".into(),
+        ..Default::default()
+    }.write(&mut writer);
+    let resp = session.dispatch(OP_AUTHENTICATE, &writer.finish());
+    assert_eq!(resp[0], 0);
+    let mut r = WireReader::new(&resp[1..]);
+    let res = AuthActionResult::read(&mut r).unwrap();
+    assert!(res.success);
+    assert_eq!(res.cookie, Some("".into()));
+}

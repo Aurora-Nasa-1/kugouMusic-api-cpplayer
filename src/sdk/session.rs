@@ -125,16 +125,18 @@ impl KugouSession {
                         "comments.floor".into(),
                         "comments.post".into(),
                         "comments.like".into(),
-                        "radio.personalFm".into(),
-                        "recommendations.similar".into(),
-                        "recommendations.intelligence".into(),
+                        "recommendations.personalFm".into(),
+                        "recommendations.similarSongs".into(),
+                        "recommendations.intelligenceSongs".into(),
                         "albums.subscribe".into(),
                         "discovery.hotSearches".into(),
-                        "discovery.suggestions".into(),
+                        "discovery.searchSuggestions".into(),
                         "playback.scrobble".into(),
                         "accounts.session".into(),
-                        "accounts.authenticate".into(),
+                        "auth.actions".into(),
                         "comments.delete".into(),
+                        "tracks.available".into(),
+                        "media.qualities".into(),
                     ],
                 };
                 Self::success_bytes(&caps)
@@ -152,7 +154,7 @@ impl KugouSession {
                     "cookie": cookie,
                 });
                 let res = standard_api::handle_api("search", &params);
-                let page = convert::to_track_page(&res);
+                let page = convert::clamp_track_page(convert::to_track_page(&res), req.limit);
                 Self::success_bytes(&page)
             }
 
@@ -168,7 +170,8 @@ impl KugouSession {
                 });
                 let res = standard_api::handle_api("song/detail", &params);
                 let page = convert::to_track_page(&res);
-                if let Some(first) = page.items.into_iter().next() {
+                if let Some(mut first) = page.items.into_iter().next() {
+                    first.id = req.id;
                     Self::success_bytes(&first)
                 } else {
                     Self::failure_bytes("NotFound", &format!("Track not found: {}", req.id))
@@ -186,12 +189,31 @@ impl KugouSession {
                 });
                 let res = standard_api::handle_api("song/detail", &params);
                 let tracks = convert::to_track_page(&res).items;
-                let outcomes = tracks
+                let mut track_map = std::collections::HashMap::new();
+                for t in tracks {
+                    track_map.insert(t.id.to_lowercase(), t);
+                }
+                let outcomes = req
+                    .ids
                     .into_iter()
-                    .map(|t| TrackOutcome {
-                        id: t.id.clone(),
-                        track: Some(t),
-                        failure: None,
+                    .map(|id| {
+                        if let Some(mut t) = track_map.remove(&id.to_lowercase()) {
+                            t.id = id.clone();
+                            TrackOutcome {
+                                id,
+                                track: Some(t),
+                                failure: None,
+                            }
+                        } else {
+                            TrackOutcome {
+                                id: id.clone(),
+                                track: None,
+                                failure: Some(Failure {
+                                    category: "NotFound".into(),
+                                    message: format!("Track {} not found", id),
+                                }),
+                            }
+                        }
                     })
                     .collect();
                 Self::success_bytes(&TrackBatch { items: outcomes })
@@ -283,7 +305,8 @@ impl KugouSession {
                     "cookie": cookie,
                 });
                 let res = standard_api::handle_api("search/special", &params);
-                Self::success_bytes(&convert::to_playlist_page(&res))
+                let page = convert::clamp_playlist_page(convert::to_playlist_page(&res), req.limit);
+                Self::success_bytes(&page)
             }
 
             OP_GETPLAYLIST => {
@@ -296,15 +319,16 @@ impl KugouSession {
                     "cookie": cookie,
                 });
                 let res = standard_api::handle_api("playlist/detail", &params);
-                let pl = convert::to_playlist(&res.get("data").unwrap_or(&res)).unwrap_or(Playlist {
-                    id: req.id,
-                    title: "Playlist".into(),
+                let mut pl = convert::to_playlist(&res.get("data").unwrap_or(&res)).unwrap_or(Playlist {
+                    id: req.id.clone(),
+                    title: "歌单".into(),
                     coverUrl: None,
                     trackCount: None,
                     creatorId: None,
                     creatorName: None,
                     description: None,
                 });
+                pl.id = req.id;
                 Self::success_bytes(&pl)
             }
 
@@ -320,7 +344,8 @@ impl KugouSession {
                     "cookie": cookie,
                 });
                 let res = standard_api::handle_api("playlist/track/all", &params);
-                Self::success_bytes(&convert::to_track_page(&res))
+                let page = convert::clamp_track_page(convert::to_track_page(&res), req.limit);
+                Self::success_bytes(&page)
             }
 
             OP_GETUSERPLAYLISTS => {
@@ -331,10 +356,13 @@ impl KugouSession {
                 let params = json!({
                     "uid": req.id,
                     "userid": req.id,
+                    "limit": req.limit,
+                    "offset": req.offset,
                     "cookie": cookie,
                 });
                 let res = standard_api::handle_api("user/playlist", &params);
-                Self::success_bytes(&convert::to_playlist_page(&res))
+                let page = convert::clamp_playlist_page(convert::to_playlist_page(&res), req.limit);
+                Self::success_bytes(&page)
             }
 
             OP_GETCREATEDPLAYLISTS => {
@@ -345,10 +373,13 @@ impl KugouSession {
                 let params = json!({
                     "uid": req.id,
                     "userid": req.id,
+                    "limit": req.limit,
+                    "offset": req.offset,
                     "cookie": cookie,
                 });
                 let res = standard_api::handle_api("user/playlist/create", &params);
-                Self::success_bytes(&convert::to_playlist_page(&res))
+                let page = convert::clamp_playlist_page(convert::to_playlist_page(&res), req.limit);
+                Self::success_bytes(&page)
             }
 
             OP_GETCOLLECTEDPLAYLISTS => {
@@ -359,10 +390,13 @@ impl KugouSession {
                 let params = json!({
                     "uid": req.id,
                     "userid": req.id,
+                    "limit": req.limit,
+                    "offset": req.offset,
                     "cookie": cookie,
                 });
                 let res = standard_api::handle_api("user/playlist/collect", &params);
-                Self::success_bytes(&convert::to_playlist_page(&res))
+                let page = convert::clamp_playlist_page(convert::to_playlist_page(&res), req.limit);
+                Self::success_bytes(&page)
             }
 
             OP_CREATEPLAYLIST => {
@@ -481,7 +515,8 @@ impl KugouSession {
                     "cookie": cookie,
                 });
                 let res = standard_api::handle_api("search/album", &params);
-                Self::success_bytes(&convert::to_album_page(&res))
+                let page = convert::clamp_album_page(convert::to_album_page(&res), req.limit);
+                Self::success_bytes(&page)
             }
 
             OP_GETALBUM => {
@@ -494,9 +529,9 @@ impl KugouSession {
                     "cookie": cookie,
                 });
                 let res = standard_api::handle_api("album/detail", &params);
-                let album = convert::to_album(&res.get("data").unwrap_or(&res)).unwrap_or(Album {
-                    id: req.id,
-                    title: "Album".into(),
+                let mut album = convert::to_album(&res.get("data").unwrap_or(&res)).unwrap_or(Album {
+                    id: req.id.clone(),
+                    title: "专辑".into(),
                     artists: Vec::new(),
                     coverUrl: None,
                     trackCount: None,
@@ -504,14 +539,24 @@ impl KugouSession {
                     company: None,
                     description: None,
                 });
+                album.id = req.id;
                 let tracks = convert::to_track_page(&res).items;
                 Self::success_bytes(&AlbumDetails { album, tracks })
             }
 
             OP_GETNEWALBUMS | OP_BROWSENEWALBUMS | OP_GETLATESTALBUMS => {
-                let params = json!({ "cookie": cookie });
+                let limit = if operation == OP_BROWSENEWALBUMS {
+                    AlbumPageRequest::read(&mut r).map(|x| x.limit).unwrap_or(20)
+                } else if operation == OP_GETNEWALBUMS {
+                    AlbumBrowseRequest::read(&mut r).map(|x| x.limit).unwrap_or(20)
+                } else {
+                    let _ = Bytes::read(&mut r);
+                    20
+                };
+                let params = json!({ "limit": limit, "cookie": cookie });
                 let res = standard_api::handle_api("top_album", &params);
-                Self::success_bytes(&convert::to_album_page(&res))
+                let page = convert::clamp_album_page(convert::to_album_page(&res), limit);
+                Self::success_bytes(&page)
             }
 
             OP_SUBSCRIBEALBUM => {
@@ -526,9 +571,11 @@ impl KugouSession {
             }
 
             OP_GETUSERALBUMS => {
-                let params = json!({ "cookie": cookie });
+                let req = UserListRequest::read(&mut r).unwrap_or(UserListRequest { id: "self".into(), limit: 20, offset: 0 });
+                let params = json!({ "limit": req.limit, "offset": req.offset, "cookie": cookie });
                 let res = standard_api::handle_api("top_album", &params);
-                Self::success_bytes(&convert::to_album_page(&res))
+                let page = convert::clamp_album_page(convert::to_album_page(&res), req.limit);
+                Self::success_bytes(&page)
             }
 
             OP_SEARCHARTISTS => {
@@ -544,7 +591,8 @@ impl KugouSession {
                     "cookie": cookie,
                 });
                 let res = standard_api::handle_api("search/author", &params);
-                Self::success_bytes(&convert::to_artist_page(&res))
+                let page = convert::clamp_artist_page(convert::to_artist_page(&res), req.limit);
+                Self::success_bytes(&page)
             }
 
             OP_GETARTIST => {
@@ -557,15 +605,16 @@ impl KugouSession {
                     "cookie": cookie,
                 });
                 let res = standard_api::handle_api("artist/detail", &params);
-                let artist = convert::to_artist(&res.get("data").unwrap_or(&res)).unwrap_or(CatalogArtist {
-                    id: req.id,
-                    name: "Artist".into(),
+                let mut artist = convert::to_artist(&res.get("data").unwrap_or(&res)).unwrap_or(CatalogArtist {
+                    id: req.id.clone(),
+                    name: "歌手".into(),
                     avatarUrl: None,
                     description: None,
                     aliases: Vec::new(),
                     albumCount: None,
                     trackCount: None,
                 });
+                artist.id = req.id;
                 Self::success_bytes(&artist)
             }
 
@@ -581,7 +630,8 @@ impl KugouSession {
                     "cookie": cookie,
                 });
                 let res = standard_api::handle_api("artist/songs", &params);
-                Self::success_bytes(&convert::to_track_page(&res))
+                let page = convert::clamp_track_page(convert::to_track_page(&res), req.limit);
+                Self::success_bytes(&page)
             }
 
             OP_GETARTISTALBUMS => {
@@ -596,43 +646,76 @@ impl KugouSession {
                     "cookie": cookie,
                 });
                 let res = standard_api::handle_api("artist/album", &params);
-                Self::success_bytes(&convert::to_album_page(&res))
+                let page = convert::clamp_album_page(convert::to_album_page(&res), req.limit);
+                Self::success_bytes(&page)
             }
 
             OP_GETHOTARTISTS => {
-                let params = json!({ "cookie": cookie });
+                let req = RecommendationsRequest::read(&mut r).unwrap_or(RecommendationsRequest { limit: 20 });
+                let params = json!({ "limit": req.limit, "cookie": cookie });
                 let res = standard_api::handle_api("top_artists", &params);
-                Self::success_bytes(&convert::to_artist_page(&res))
+                let page = convert::clamp_artist_page(convert::to_artist_page(&res), req.limit);
+                Self::success_bytes(&page)
             }
 
             OP_GETRECOMMENDEDSONGS => {
-                let params = json!({ "cookie": cookie });
+                let req = RecommendationsRequest::read(&mut r).unwrap_or(RecommendationsRequest { limit: 20 });
+                let params = json!({ "limit": req.limit, "cookie": cookie });
                 let res = standard_api::handle_api("recommend/songs", &params);
-                Self::success_bytes(&convert::to_track_page(&res))
+                let page = convert::clamp_track_page(convert::to_track_page(&res), req.limit);
+                Self::success_bytes(&page)
             }
 
-            OP_GETRECOMMENDEDPLAYLISTS | OP_GETPERSONALIZEDPLAYLISTS | OP_GETTOPPLAYLISTS => {
-                let params = json!({ "cookie": cookie });
+            OP_GETRECOMMENDEDPLAYLISTS | OP_GETPERSONALIZEDPLAYLISTS => {
+                let req = RecommendationsRequest::read(&mut r).unwrap_or(RecommendationsRequest { limit: 20 });
+                let params = json!({ "limit": req.limit, "cookie": cookie });
                 let res = standard_api::handle_api("personalized", &params);
-                Self::success_bytes(&convert::to_playlist_page(&res))
+                let page = convert::clamp_playlist_page(convert::to_playlist_page(&res), req.limit);
+                Self::success_bytes(&page)
             }
 
-            OP_GETHIGHQUALITYPLAYLISTS => {
-                let params = json!({ "cookie": cookie });
-                let res = standard_api::handle_api("top_playlist_highquality", &params);
-                Self::success_bytes(&convert::to_playlist_page(&res))
+            OP_GETTOPPLAYLISTS | OP_GETHIGHQUALITYPLAYLISTS => {
+                let req = PlaylistBrowseRequest::read(&mut r).unwrap_or_default();
+                let limit = if req.limit > 0 { req.limit } else { 20 };
+                let api_name = if operation == OP_GETHIGHQUALITYPLAYLISTS {
+                    "top_playlist_highquality"
+                } else {
+                    "personalized"
+                };
+                let params = json!({
+                    "limit": limit,
+                    "cat": if req.category.is_empty() { None } else { Some(req.category) },
+                    "cookie": cookie
+                });
+                let res = standard_api::handle_api(api_name, &params);
+                let page = convert::clamp_playlist_page(convert::to_playlist_page(&res), limit);
+                Self::success_bytes(&page)
             }
 
-            OP_GETPERSONALIZEDNEWSONGS | OP_GETTOPSONGS => {
-                let params = json!({ "cookie": cookie });
+            OP_GETPERSONALIZEDNEWSONGS => {
+                let req = RecommendationsRequest::read(&mut r).unwrap_or(RecommendationsRequest { limit: 20 });
+                let limit = if req.limit > 0 { req.limit } else { 20 };
+                let params = json!({ "limit": limit, "cookie": cookie });
                 let res = standard_api::handle_api("personalized_newsong", &params);
-                Self::success_bytes(&convert::to_track_page(&res))
+                let page = convert::clamp_track_page(convert::to_track_page(&res), limit);
+                Self::success_bytes(&page)
+            }
+
+            OP_GETTOPSONGS => {
+                let req = TopSongsRequest::read(&mut r).unwrap_or_default();
+                let limit = if req.limit > 0 { req.limit } else { 50 };
+                let params = json!({ "type": req.region, "cookie": cookie });
+                let res = standard_api::handle_api("top_song", &params);
+                let page = convert::clamp_track_page(convert::to_track_page(&res), limit);
+                Self::success_bytes(&page)
             }
 
             OP_GETPERSONALFM => {
+                let _ = Bytes::read(&mut r);
                 let params = json!({ "cookie": cookie });
                 let res = standard_api::handle_api("personal_fm", &params);
-                Self::success_bytes(&convert::to_track_page(&res))
+                let page = convert::clamp_track_page(convert::to_track_page(&res), 30);
+                Self::success_bytes(&page)
             }
 
             OP_GETSIMILARSONGS => {
@@ -647,7 +730,8 @@ impl KugouSession {
                     "cookie": cookie,
                 });
                 let res = standard_api::handle_api("simi_song", &params);
-                Self::success_bytes(&convert::to_track_page(&res))
+                let page = convert::clamp_track_page(convert::to_track_page(&res), req.limit);
+                Self::success_bytes(&page)
             }
 
             OP_GETINTELLIGENCESONGS => {
@@ -726,11 +810,16 @@ impl KugouSession {
                 if let Some(arr) = res.get("data").and_then(Value::as_array) {
                     for item in arr {
                         if let Some(s) = item.as_str() {
-                            items.push(s.to_string());
+                            let st = s.trim();
+                            if !st.is_empty() { items.push(st.to_string()); }
                         } else if let Some(w) = item.get("searchWord").and_then(Value::as_str) {
-                            items.push(w.to_string());
+                            let wt = w.trim();
+                            if !wt.is_empty() { items.push(wt.to_string()); }
                         }
                     }
+                }
+                if items.len() > 30 {
+                    items.truncate(30);
                 }
                 Self::success_bytes(&SuggestionPage { items })
             }
@@ -746,19 +835,19 @@ impl KugouSession {
                 });
                 let res = standard_api::handle_api("login/status", &params);
                 let prof = res.pointer("/data/profile").unwrap_or(&res);
-                let id = convert::first_string(prof, &["/userId", "/userid", "/id"]);
+                let _id = convert::first_string(prof, &["/userId", "/userid", "/id"]);
                 let nickname = convert::first_string(prof, &["/nickname", "/username"]);
-                let avatar = convert::first_string(prof, &["/avatarUrl", "/userpic"]).replace("{size}", "200");
+                let avatar = convert::first_string(prof, &["/avatarUrl", "/userpic"]);
                 let sig = convert::first_string(prof, &["/signature", "/sign"]);
-                let p_cnt = convert::first_i64(prof, &["/playlistCount"]) as i32;
-                let follows = convert::first_i64(prof, &["/follows"]) as i32;
-                let followeds = convert::first_i64(prof, &["/followeds"]) as i32;
+                let p_cnt = convert::first_i64(prof, &["/playlistCount"]).max(0) as i32;
+                let follows = convert::first_i64(prof, &["/follows"]).max(0) as i32;
+                let followeds = convert::first_i64(prof, &["/followeds"]).max(0) as i32;
 
                 Self::success_bytes(&UserProfile {
-                    id: if id.is_empty() { req.id } else { id },
-                    nickname: if nickname.is_empty() { "Kugou User".into() } else { nickname },
-                    avatarUrl: if avatar.is_empty() { None } else { Some(avatar) },
-                    signature: if sig.is_empty() { None } else { Some(sig) },
+                    id: req.id,
+                    nickname: if nickname.trim().is_empty() { "Kugou User".into() } else { nickname.trim().to_string() },
+                    avatarUrl: convert::sanitize_http_url(&avatar),
+                    signature: if sig.trim().is_empty() { None } else { Some(sig.trim().to_string()) },
                     playlistCount: p_cnt,
                     follows,
                     followeds,
@@ -766,15 +855,20 @@ impl KugouSession {
             }
 
             OP_GETUSERRECORDS => {
+                let req = UserRecordsRequest::read(&mut r).unwrap_or_default();
+                let limit = if req.limit > 0 { req.limit } else { 50 };
                 let params = json!({ "cookie": cookie });
                 let res = standard_api::handle_api("recommend/songs", &params);
-                Self::success_bytes(&convert::to_track_page(&res))
+                let page = convert::clamp_track_page(convert::to_track_page(&res), limit);
+                Self::success_bytes(&page)
             }
 
             OP_GETUSERCLOUD => {
+                let req = UserListRequest::read(&mut r).unwrap_or(UserListRequest { id: "self".into(), limit: 20, offset: 0 });
                 let params = json!({ "cookie": cookie });
                 let res = standard_api::handle_api("recommend/songs", &params);
-                Self::success_bytes(&convert::to_track_page(&res))
+                let page = convert::clamp_track_page(convert::to_track_page(&res), req.limit);
+                Self::success_bytes(&page)
             }
 
             OP_DELETEUSERCLOUD => {
@@ -1041,7 +1135,7 @@ impl KugouSession {
                 };
                 let action = req.action.to_lowercase();
                 match action.as_str() {
-                    "key" | "qr_key" => {
+                    "qr.key" | "qr_key" | "key" => {
                         let res = standard_api::handle_api("login/qr/key", &json!({ "cookie": cookie }));
                         let key = convert::first_string(&res, &["/data/unikey", "/data/key", "/unikey"]);
                         Self::success_bytes(&AuthActionResult {
@@ -1057,11 +1151,17 @@ impl KugouSession {
                             message: None,
                         })
                     }
-                    "create" | "qr_create" => {
+                    "qr.create" | "qr_create" | "create" => {
                         let key_str = req.key.clone().unwrap_or_default();
-                        let res = standard_api::handle_api("login/qr/create", &json!({ "key": key_str, "cookie": cookie }));
-                        let url = convert::first_string(&res, &["/data/qrurl", "/data/url", "/qrurl"]);
-                        let img = convert::first_string(&res, &["/data/qrimg", "/data/imageBase64", "/qrimg"]);
+                        let res = standard_api::handle_api(
+                            "login/qr/create",
+                            &json!({ "key": key_str, "qrimg": true, "cookie": cookie }),
+                        );
+                        let url = convert::first_string(&res, &["/data/url", "/data/qrurl", "/url", "/qrurl"]);
+                        let img = convert::first_string(
+                            &res,
+                            &["/data/base64", "/data/qrimg", "/data/imageBase64", "/base64", "/qrimg"],
+                        );
                         Self::success_bytes(&AuthActionResult {
                             success: !url.is_empty() || !img.is_empty(),
                             code: Some(200),
@@ -1075,9 +1175,12 @@ impl KugouSession {
                             message: None,
                         })
                     }
-                    "check" | "qr_check" => {
+                    "qr.check" | "qr_check" | "check" => {
                         let key_str = req.key.clone().unwrap_or_default();
-                        let res = standard_api::handle_api("login/qr/check", &json!({ "key": key_str, "cookie": cookie }));
+                        let res = standard_api::handle_api(
+                            "login/qr/check",
+                            &json!({ "key": key_str, "cookie": cookie }),
+                        );
                         let status = convert::first_i64(&res, &["/data/code", "/code"]) as i32;
                         let auth_cookie = convert::first_string(&res, &["/data/cookie", "/cookie"]);
                         Self::success_bytes(&AuthActionResult {
@@ -1093,6 +1196,151 @@ impl KugouSession {
                             message: None,
                         })
                     }
+                    "login.phone" | "login_phone" | "phone" => {
+                        let phone = req.phone.clone().unwrap_or_default();
+                        let captcha = req.captcha.clone().unwrap_or_default();
+                        let password = req.password.clone().unwrap_or_default();
+
+                        let ctx = crate::modules::Ctx {
+                            ip: String::new(),
+                            body_bytes: None,
+                        };
+
+                        let result = if !captcha.is_empty() {
+                            let mut q_map = serde_json::Map::new();
+                            q_map.insert("mobile".to_string(), json!(phone));
+                            q_map.insert("code".to_string(), json!(captcha));
+                            q_map.insert("cookie".to_string(), cookie);
+                            crate::modules::login::handle_cellphone(&Value::Object(q_map), &ctx)
+                        } else if !password.is_empty() {
+                            let mut q_map = serde_json::Map::new();
+                            q_map.insert("username".to_string(), json!(phone));
+                            q_map.insert("password".to_string(), json!(password));
+                            q_map.insert("cookie".to_string(), cookie);
+                            crate::modules::login::handle_login(&Value::Object(q_map), &ctx)
+                        } else {
+                            return Self::success_bytes(&AuthActionResult {
+                                success: false,
+                                code: Some(400),
+                                status: Some(400),
+                                key: None,
+                                url: None,
+                                imageBase64: None,
+                                cookie: None,
+                                verifyUrl: None,
+                                challenge: false,
+                                message: Some("Phone and captcha/password are required".to_string()),
+                            });
+                        };
+
+                        match result {
+                            Ok(resp) => {
+                                let body = resp.body.to_json();
+                                let status_ok = body.get("status").and_then(Value::as_i64) == Some(1)
+                                    || body.get("code").and_then(Value::as_i64) == Some(0)
+                                    || body.get("code").and_then(Value::as_i64) == Some(200);
+                                let mut cookies = resp.cookie;
+                                if let Some(token) = body.pointer("/data/token").and_then(Value::as_str) {
+                                    cookies.push(format!("token={}", token));
+                                }
+                                if let Some(uid) = body.pointer("/data/userid").and_then(convert::value_to_string) {
+                                    cookies.push(format!("userid={}", uid));
+                                }
+                                let auth_cookie = cookies.join("; ");
+                                let msg = convert::first_string(&body, &["/msg", "/error", "/message"]);
+
+                                Self::success_bytes(&AuthActionResult {
+                                    success: status_ok && !auth_cookie.is_empty(),
+                                    code: Some(200),
+                                    status: Some(if status_ok { 200 } else { 400 }),
+                                    key: None,
+                                    url: None,
+                                    imageBase64: None,
+                                    cookie: if auth_cookie.is_empty() { None } else { Some(auth_cookie) },
+                                    verifyUrl: None,
+                                    challenge: false,
+                                    message: if msg.is_empty() { None } else { Some(msg) },
+                                })
+                            }
+                            Err(err) => {
+                                let body = err.body.to_json();
+                                let msg = convert::first_string(&body, &["/msg", "/error"]);
+                                Self::success_bytes(&AuthActionResult {
+                                    success: false,
+                                    code: Some(err.status as i32),
+                                    status: Some(err.status as i32),
+                                    key: None,
+                                    url: None,
+                                    imageBase64: None,
+                                    cookie: None,
+                                    verifyUrl: None,
+                                    challenge: false,
+                                    message: Some(if msg.is_empty() {
+                                        format!("Login failed with status {}", err.status)
+                                    } else {
+                                        msg
+                                    }),
+                                })
+                            }
+                        }
+                    }
+                    "captcha.send" | "captcha_send" => {
+                        let phone = req.phone.clone().unwrap_or_default();
+                        let ctx = crate::modules::Ctx {
+                            ip: String::new(),
+                            body_bytes: None,
+                        };
+                        let mut q_map = serde_json::Map::new();
+                        q_map.insert("mobile".to_string(), json!(phone));
+                        q_map.insert("cookie".to_string(), cookie);
+                        let result = crate::modules::misc::handle_captcha_sent(&Value::Object(q_map), &ctx);
+
+                        match result {
+                            Ok(resp) => {
+                                let body = resp.body.to_json();
+                                let status_ok = body.get("status").and_then(Value::as_i64) == Some(1)
+                                    || body.get("code").and_then(Value::as_i64) == Some(0)
+                                    || body.get("code").and_then(Value::as_i64) == Some(200);
+                                let msg = convert::first_string(&body, &["/msg", "/message"]);
+                                Self::success_bytes(&AuthActionResult {
+                                    success: status_ok,
+                                    code: Some(200),
+                                    status: Some(if status_ok { 200 } else { 400 }),
+                                    key: None,
+                                    url: None,
+                                    imageBase64: None,
+                                    cookie: None,
+                                    verifyUrl: None,
+                                    challenge: false,
+                                    message: if msg.is_empty() { None } else { Some(msg) },
+                                })
+                            }
+                            Err(err) => Self::success_bytes(&AuthActionResult {
+                                success: false,
+                                code: Some(err.status as i32),
+                                status: Some(err.status as i32),
+                                key: None,
+                                url: None,
+                                imageBase64: None,
+                                cookie: None,
+                                verifyUrl: None,
+                                challenge: false,
+                                message: Some(format!("Failed to send captcha: {}", err.status)),
+                            }),
+                        }
+                    }
+                    "logout" => Self::success_bytes(&AuthActionResult {
+                        success: true,
+                        code: Some(200),
+                        status: Some(200),
+                        key: None,
+                        url: None,
+                        imageBase64: None,
+                        cookie: Some(String::new()),
+                        verifyUrl: None,
+                        challenge: false,
+                        message: Some("Logged out".to_string()),
+                    }),
                     _ => Self::success_bytes(&AuthActionResult {
                         success: false,
                         code: Some(400),
@@ -1215,3 +1463,145 @@ impl_wire_writable!(
     QualityPage,
     TrackAvailability
 );
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_capabilities_declaration_matches_contract() {
+        let session = KugouSession::new("kugou".into(), None, None, None);
+        let resp_bytes = session.dispatch(OP_CAPABILITIES, &[]);
+        assert_eq!(resp_bytes[0], 0); // 0 = Success
+        let mut r = WireReader::new(&resp_bytes[1..]);
+        let caps = Capabilities::read(&mut r).expect("Capabilities wire decode failed");
+
+        let expected_caps = [
+            "recommendations.personalFm",
+            "recommendations.similarSongs",
+            "recommendations.intelligenceSongs",
+            "discovery.searchSuggestions",
+            "auth.actions",
+            "tracks.available",
+            "media.qualities",
+            "recommendations.songs",
+            "recommendations.playlists",
+        ];
+
+        for cap in expected_caps {
+            assert!(
+                caps.supported.contains(&cap.to_string()),
+                "Missing declared capability: {}",
+                cap
+            );
+        }
+    }
+
+    #[test]
+    fn test_recommend_and_personal_fm_parsing() {
+        // 每日推荐返回结构
+        let daily_res = json!({
+            "code": 0,
+            "data": {
+                "dailySongs": [
+                    {
+                        "id": "DAILY_HASH_1",
+                        "title": "Daily Song 1",
+                        "artist": "Daily Artist",
+                        "duration": 200,
+                        "album": "Daily Album",
+                        "coverUrl": "https://img.kugou.com/cover/1.jpg"
+                    }
+                ]
+            }
+        });
+        let page = convert::to_track_page(&daily_res);
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].id, "DAILY_HASH_1");
+        assert_eq!(page.items[0].title, "Daily Song 1");
+        assert_eq!(page.items[0].artists[0].name, "Daily Artist");
+
+        // 私人 FM 返回结构（data 为直接数组）
+        let fm_res = json!({
+            "code": 0,
+            "data": [
+                {
+                    "hash": "FM_HASH_1",
+                    "SongName": "FM Song 1",
+                    "SingerName": "FM Artist",
+                    "timelen": 180000,
+                    "cover": "//img.kugou.com/fm/1.jpg"
+                }
+            ]
+        });
+        let fm_page = convert::to_track_page(&fm_res);
+        assert_eq!(fm_page.items.len(), 1);
+        assert_eq!(fm_page.items[0].id, "FM_HASH_1");
+        assert_eq!(fm_page.items[0].title, "FM Song 1");
+        assert_eq!(fm_page.items[0].coverUrl, Some("https://img.kugou.com/fm/1.jpg".to_string()));
+    }
+
+    #[test]
+    fn test_page_clamping_strictness() {
+        let mut tracks = Vec::new();
+        for i in 0..30 {
+            tracks.push(Track {
+                id: format!("hash_{}", i),
+                title: format!("Title {}", i),
+                artists: vec![Artist { id: None, name: "Artist".into() }],
+                durationMs: 1000,
+                album: None,
+                coverUrl: None,
+            });
+        }
+        let raw_page = TrackPage {
+            items: tracks,
+            total: Some(10), // total 非法小于 items 长度
+            hasMore: Some(true),
+        };
+        let clamped = convert::clamp_track_page(raw_page, 20);
+        assert_eq!(clamped.items.len(), 20);
+        assert!(clamped.total.unwrap() >= clamped.items.len() as i64);
+    }
+
+    #[test]
+    fn test_auth_actions_dispatch() {
+        let session = KugouSession::new("kugou".into(), None, None, None);
+
+        // 1. qr.key
+        let mut writer = WireWriter::new();
+        AuthActionRequest {
+            action: "qr.key".into(),
+            ..Default::default()
+        }.write(&mut writer);
+        let resp = session.dispatch(OP_AUTHENTICATE, &writer.finish());
+        assert_eq!(resp[0], 0);
+
+        // 2. qr.create
+        let mut writer = WireWriter::new();
+        AuthActionRequest {
+            action: "qr.create".into(),
+            key: Some("sample-key".into()),
+            ..Default::default()
+        }.write(&mut writer);
+        let resp = session.dispatch(OP_AUTHENTICATE, &writer.finish());
+        assert_eq!(resp[0], 0);
+        let mut r = WireReader::new(&resp[1..]);
+        let res = AuthActionResult::read(&mut r).unwrap();
+        assert!(res.success);
+        assert!(res.imageBase64.is_some(), "Expected imageBase64 to be populated for qr.create");
+
+        // 3. logout
+        let mut writer = WireWriter::new();
+        AuthActionRequest {
+            action: "logout".into(),
+            ..Default::default()
+        }.write(&mut writer);
+        let resp = session.dispatch(OP_AUTHENTICATE, &writer.finish());
+        assert_eq!(resp[0], 0);
+        let mut r = WireReader::new(&resp[1..]);
+        let res = AuthActionResult::read(&mut r).unwrap();
+        assert!(res.success);
+        assert_eq!(res.cookie, Some("".into()));
+    }
+}
