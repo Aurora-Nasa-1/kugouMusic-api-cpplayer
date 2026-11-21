@@ -142,8 +142,18 @@ pub fn handle_lyric(q: &Value, ctx: &Ctx) -> Result<ModuleResponse, ModuleRespon
         "lrctxt": 1,
         "man": man,
     });
+    // lyrics.kugou.com exposes this endpoint at /search; /v1/search returns an empty body.
     forward(
-        q, ctx, "GET", "/v1/search", Some("https://lyrics.kugou.com"),
-        Some(data_map), None, "android", &[], true, false,
+        q,
+        ctx,
+        "GET",
+        "/search",
+        Some("https://lyrics.kugou.com"),
+        Some(data_map),
+        None,
+        "android",
+        &[],
+        true,
+        false,
     )
 }
