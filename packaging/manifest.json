@@ -1,7 +1,7 @@
 {
   "id": "kugou",
   "name": "酷狗音乐",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "type": "native",
   "contract": "kmp-sdk-v1",
   "entryPoint": "kugou_music_rs.dll",
